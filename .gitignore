@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets — never commit
+.env
+
+# Claude instructions — keep local, never commit
+CLAUDE.md
+
+# Model checkpoints — regenerable, live in DagsHub registry
+checkpoints/
+
+# Data files — too large for git
+data/raw/
+data/features/
+data/forecasts/
+
+# MLflow experiment tracking
+mlruns/
+mlflow.db
+mlartifacts/
+
+# Mac junk
+.DS_Store
