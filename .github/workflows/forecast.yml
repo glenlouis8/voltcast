@@ -9,7 +9,7 @@ name: forecast
 
 on:
   schedule:
-    - cron: "37 * * * *"     # 37 min past every hour (UTC). Off-peak minute = more reliable than :00.
+    - cron: "0 * * * *"      # every hour, on the hour (UTC)
   workflow_dispatch: {}        # "Run workflow" button for manual testing
 
 jobs:
