@@ -84,7 +84,12 @@ def forecast(region: str) -> None:
 
     # 24 future hourly timestamps after the last known hour. pd.Timestamp avoids
     # a numpy timedelta-unit deprecation warning.
+    # EIA periods are UTC but stored naive. Mark them UTC-aware so the isoformat
+    # strings carry +00:00 — otherwise the browser parses them as its own local
+    # time and the chart shifts by the viewer's offset.
     last_ts = pd.Timestamp(window["timestamp"].iloc[-1])
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize("UTC")
     future_ts = pd.date_range(
         start=last_ts + pd.Timedelta(hours=1),
         periods=FORECAST_HORIZON,
@@ -99,7 +104,7 @@ def forecast(region: str) -> None:
     # rich payload so one fetch gives the dashboard everything it needs
     payload = {
         "region":       region,
-        "generated_at": pd.Timestamp.utcnow().isoformat(),
+        "generated_at": pd.Timestamp.now(tz="UTC").isoformat(),
         "champion":     champ_meta,
         "forecast": [
             {"timestamp": ts.isoformat(), "predicted_load_mw": float(mw)}
