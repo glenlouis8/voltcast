@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   LineChart,
   Line,
@@ -109,6 +110,9 @@ export default function Home() {
         <h1>
           <span className="bolt">⚡</span> VoltCast
         </h1>
+        <Link href="/how-it-works" className="navlink">
+          How it works →
+        </Link>
       </div>
       <p className="subtitle">
         24-hour-ahead US electricity demand forecasts, powered by a from-scratch Transformer.
