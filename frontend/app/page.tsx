@@ -46,6 +46,18 @@ function fmtPct(n: number): string {
   return n > 0 ? n.toFixed(2) + "%" : "—";
 }
 
+// reused chrome
+const PANEL = "bg-panel border border-border rounded-2xl p-6";
+
+function Card({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="bg-panel border border-border rounded-2xl px-5 py-[18px]">
+      <div className="text-muted text-xs uppercase tracking-wider mb-2">{label}</div>
+      <div className={`text-2xl font-bold ${accent ? "text-accent" : ""}`}>{value}</div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [region, setRegion] = useState<string>("CAL");
   const [data, setData] = useState<Payload | null>(null);
@@ -105,75 +117,67 @@ export default function Home() {
   const trough = data ? Math.min(...data.forecast.map((r) => r.predicted_load_mw)) : 0;
 
   return (
-    <main className="container">
-      <div className="header">
-        <h1>
-          <span className="bolt">⚡</span> VoltCast
+    <main className="max-w-[1000px] mx-auto px-5 pt-10 pb-20">
+      <div className="flex items-baseline gap-3 flex-wrap mb-1.5">
+        <h1 className="text-3xl font-bold tracking-tight">
+          <span className="text-accent">⚡</span> VoltCast
         </h1>
-        <Link href="/how-it-works" className="navlink">
+        <Link href="/how-it-works" className="ml-auto text-accent-2 hover:text-accent text-sm font-semibold">
           How it works →
         </Link>
       </div>
-      <p className="subtitle">
+      <p className="text-muted text-[15px] mb-7">
         24-hour-ahead US electricity demand forecasts, powered by a from-scratch Transformer.
       </p>
 
       {/* region tabs */}
-      <div className="tabs">
-        {REGIONS.map((r) => (
-          <button
-            key={r}
-            className={`tab ${r === region ? "active" : ""}`}
-            onClick={() => setRegion(r)}
-          >
-            {REGION_NAMES[r]}
-          </button>
-        ))}
+      <div className="flex gap-2 flex-wrap mb-7">
+        {REGIONS.map((r) => {
+          const active = r === region;
+          return (
+            <button
+              key={r}
+              onClick={() => setRegion(r)}
+              className={`px-[18px] py-2.5 rounded-[10px] text-sm font-semibold border transition-colors ${
+                active
+                  ? "bg-accent border-accent text-bg"
+                  : "bg-panel border-border text-muted hover:border-accent-2 hover:text-text"
+              }`}
+            >
+              {REGION_NAMES[r]}
+            </button>
+          );
+        })}
       </div>
 
-      {loading && <div className="state">Loading {REGION_NAMES[region]}…</div>}
-      {error && <div className="state error">{error}</div>}
+      {loading && <div className="text-center py-16 text-muted">Loading {REGION_NAMES[region]}…</div>}
+      {error && <div className="text-center py-16 text-[#ff6b6b]">{error}</div>}
 
       {data && !loading && !error && (
         <>
           {/* champion + stat cards */}
-          <div className="cards">
-            <div className="card">
-              <div className="label">Model</div>
-              <div className="value">
-                {data.champion.model_type.charAt(0).toUpperCase() +
-                  data.champion.model_type.slice(1)}
-              </div>
-            </div>
-            <div className="card">
-              <div className="label">Version</div>
-              <div className="value">v{data.champion.version}</div>
-            </div>
-            <div className="card">
-              <div className="label">Test MAE</div>
-              <div className="value accent">{fmtMW(data.champion.test_mae_mw)}</div>
-            </div>
-            <div className="card">
-              <div className="label">Test WAPE</div>
-              <div className="value accent">{fmtPct(data.champion.test_wape)}</div>
-            </div>
-            <div className="card">
-              <div className="label">Peak</div>
-              <div className="value">{fmtMW(peak)}</div>
-            </div>
-            <div className="card">
-              <div className="label">Trough</div>
-              <div className="value">{fmtMW(trough)}</div>
-            </div>
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3.5 mb-6">
+            <Card
+              label="Model"
+              value={
+                data.champion.model_type.charAt(0).toUpperCase() +
+                data.champion.model_type.slice(1)
+              }
+            />
+            <Card label="Version" value={`v${data.champion.version}`} />
+            <Card label="Test MAE" value={fmtMW(data.champion.test_mae_mw)} accent />
+            <Card label="Test WAPE" value={fmtPct(data.champion.test_wape)} accent />
+            <Card label="Peak" value={fmtMW(peak)} />
+            <Card label="Trough" value={fmtMW(trough)} />
           </div>
 
           {/* forecast chart */}
-          <div className="panel">
-            <h2>
+          <div className={PANEL}>
+            <h2 className="text-base font-semibold mb-1">
               Next 24 hours — {REGION_NAMES[region]}{" "}
-              <span className="tz">(UTC)</span>
+              <span className="text-muted text-[13px] font-normal">(UTC)</span>
             </h2>
-            <div className="meta">
+            <div className="text-muted text-[13px] mb-5">
               Generated{" "}
               {new Date(data.generated_at).toLocaleString("en-US", {
                 timeZone: "UTC",
@@ -214,16 +218,20 @@ export default function Home() {
           </div>
 
           {/* hourly table — same UTC data as the chart, exact numbers */}
-          <div className="panel">
-            <h2>
-              Hourly forecast <span className="tz">(UTC)</span>
+          <div className={`${PANEL} mt-5`}>
+            <h2 className="text-base font-semibold mb-1">
+              Hourly forecast <span className="text-muted text-[13px] font-normal">(UTC)</span>
             </h2>
-            <div className="table-wrap">
-              <table className="forecast-table">
+            <div className="mt-4 max-h-[420px] overflow-y-auto">
+              <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr>
-                    <th>Time</th>
-                    <th className="num">Predicted load</th>
+                    <th className="text-left text-muted font-medium text-xs uppercase tracking-wide px-3 py-2 sticky top-0 bg-panel border-b border-border">
+                      Time
+                    </th>
+                    <th className="text-right text-muted font-medium text-xs uppercase tracking-wide px-3 py-2 sticky top-0 bg-panel border-b border-border">
+                      Predicted load
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -233,7 +241,7 @@ export default function Home() {
                     const isTrough = row.predicted_load_mw === trough;
                     return (
                       <tr key={row.timestamp}>
-                        <td>
+                        <td className="px-3 py-2 border-b border-border">
                           {d.toLocaleString("en-US", {
                             timeZone: "UTC",
                             weekday: "short",
@@ -241,10 +249,20 @@ export default function Home() {
                             minute: "2-digit",
                             hour12: false,
                           })}
-                          {isPeak && <span className="tag peak">peak</span>}
-                          {isTrough && <span className="tag trough">trough</span>}
+                          {isPeak && (
+                            <span className="ml-2 text-[11px] px-1.5 py-px rounded uppercase tracking-wide bg-accent/15 text-accent">
+                              peak
+                            </span>
+                          )}
+                          {isTrough && (
+                            <span className="ml-2 text-[11px] px-1.5 py-px rounded uppercase tracking-wide bg-muted/15 text-muted">
+                              trough
+                            </span>
+                          )}
                         </td>
-                        <td className="num">{fmtMW(row.predicted_load_mw)}</td>
+                        <td className="px-3 py-2 border-b border-border text-right tabular">
+                          {fmtMW(row.predicted_load_mw)}
+                        </td>
                       </tr>
                     );
                   })}
@@ -255,9 +273,14 @@ export default function Home() {
         </>
       )}
 
-      <div className="footer">
+      <div className="mt-10 text-muted text-[13px] text-center">
         Built with PyTorch · MLflow/DagsHub · AWS S3 · GitHub Actions ·{" "}
-        <a href="https://github.com/glenlouis8/voltcast" target="_blank" rel="noreferrer">
+        <a
+          href="https://github.com/glenlouis8/voltcast"
+          target="_blank"
+          rel="noreferrer"
+          className="text-accent-2 hover:text-accent no-underline"
+        >
           source
         </a>
       </div>
