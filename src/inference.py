@@ -33,9 +33,9 @@ from evaluate import get_scaler, denormalize
 from dataset import FEATURE_COLS, SEQ_LEN, FORECAST_HORIZON
 from model import LSTMBaseline, TemporalTransformer
 from mlflow_setup import setup_mlflow
+from storage import save_forecast
 
 FEATURES_DIR  = Path(__file__).parent.parent / "data" / "features"
-FORECASTS_DIR = Path(__file__).parent.parent / "data" / "forecasts"
 
 
 # ── load the champion model from the registry ─────────────────────────────────
@@ -124,13 +124,12 @@ def forecast(region: str) -> None:
         "predicted_load_mw": preds_mw,
     })
 
-    FORECASTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = FORECASTS_DIR / f"{region}_forecast.parquet"
-    out.to_parquet(out_path, index=False)
+    # save_forecast writes to S3 if configured, else local disk.
+    location = save_forecast(region, out)
 
     print(f"\n  Forecast window: {future_ts[0]} → {future_ts[-1]}")
     print(f"  Predicted load:  {preds_mw.min():,.0f} – {preds_mw.max():,.0f} MW")
-    print(f"  Saved → {out_path}")
+    print(f"  Saved → {location}")
     print("\n  Next 24 hours:")
     for ts, mw in zip(future_ts, preds_mw):
         print(f"    {ts:%Y-%m-%d %H:%M}  {mw:>8,.0f} MW")

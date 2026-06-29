@@ -1,0 +1,39 @@
+# forecast.yml — DAILY-ish (hourly) 24h forecast robot.
+#
+# Runs `pipeline.py forecast`: pull fresh EIA → validate → features →
+# each champion predicts next 24h → forecasts written to S3 (parquet + JSON).
+#
+# No training here. Cheap + fast. Keeps the dashboard/frontend current.
+
+name: forecast
+
+on:
+  schedule:
+    - cron: "0 * * * *"      # top of every hour (UTC). Rolling 24h forecast.
+  workflow_dispatch: {}        # "Run workflow" button for manual testing
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # All secrets injected from repo Settings → Secrets and variables → Actions.
+      EIA_API_KEY:           ${{ secrets.EIA_API_KEY }}
+      DAGSHUB_REPO_OWNER:    ${{ secrets.DAGSHUB_REPO_OWNER }}
+      DAGSHUB_REPO_NAME:     ${{ secrets.DAGSHUB_REPO_NAME }}
+      DAGSHUB_TOKEN:         ${{ secrets.DAGSHUB_TOKEN }}
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION:    ${{ secrets.AWS_DEFAULT_REGION }}
+      S3_BUCKET:             ${{ secrets.S3_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen        # exact versions from uv.lock
+
+      - name: Run forecast pipeline
+        run: uv run python src/pipeline.py forecast

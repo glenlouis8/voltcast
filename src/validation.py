@@ -19,6 +19,7 @@ Prints a report so you can see exactly what was removed and why.
 
 import pandas as pd
 import numpy as np
+import pandera.pandas as pa
 from pathlib import Path
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -40,6 +41,55 @@ MAX_LOAD_MW = {
     "PJM": 200_000,
     "MISO": 155_000,
 }
+
+
+# ── Pandera schema — the "data contract" ──────────────────────────────────────
+# A reusable gate any file can import. Define the rules ONCE here; call
+# validate(df, region) wherever fresh data enters (ingestion, drift, retrain).
+# If a batch breaks the contract, it raises — so corrupt data never reaches
+# training. This is the automated-pipeline guard (no human watching).
+
+def build_schema(region: str) -> pa.DataFrameSchema:
+    """
+    Build the validation schema for a region.
+
+    Region-specific because the max-load ceiling differs per grid
+    (CAL ~80k MW, PJM ~200k MW, etc.).
+
+    Rules enforced:
+        timestamp — must exist, no nulls
+        load_mw   — float, > 0, below the region's physical ceiling, no nulls
+    """
+    return pa.DataFrameSchema(
+        {
+            "timestamp": pa.Column(
+                "datetime64[ns]",
+                nullable=False,            # every row must have a time
+            ),
+            "load_mw": pa.Column(
+                float,
+                checks=[
+                    pa.Check.greater_than(0),                    # demand always positive
+                    pa.Check.less_than(MAX_LOAD_MW[region]),     # catch corrupt spikes (e.g. 2^31-1)
+                ],
+                nullable=False,            # no missing readings
+            ),
+        },
+        strict=False,   # extra columns (rolling_mean_24 etc.) are allowed
+        coerce=True,    # convert compatible types (e.g. int64 load → float64) instead of rejecting
+    )
+
+
+def validate(df: pd.DataFrame, region: str) -> pd.DataFrame:
+    """
+    Run the schema against a batch. Returns the df unchanged if it passes;
+    raises pandera.errors.SchemaError if any row breaks the contract.
+
+    Use this as a GATE before using freshly-pulled data:
+        df = validate(fetch_region(region, key), region)   # blows up on bad data
+    """
+    schema = build_schema(region)
+    return schema.validate(df, lazy=True)   # lazy=True collects ALL failures, not just the first
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -99,8 +149,10 @@ def validate_region(region: str) -> pd.DataFrame:
     # .diff() computes difference between consecutive timestamps.
     # A normal gap = 1 hour. Anything > 2 hours means data is missing.
     df_clean = df_clean.sort_values("timestamp").reset_index(drop=True)
-    time_diffs = df_clean["timestamp"].diff().dropna()
-    big_gaps = time_diffs[time_diffs > pd.Timedelta(hours=2)]
+    # Convert gaps to plain hours (float) so we compare numbers, not raw
+    # timedelta64 — avoids a numpy timedelta-unit deprecation warning.
+    gap_hours = df_clean["timestamp"].diff().dt.total_seconds() / 3600
+    big_gaps = gap_hours[gap_hours > 2]
 
     if len(big_gaps) > 0:
         print(f"  [WARN]  Timestamp gaps > 2 hours: {len(big_gaps)} gaps found")
@@ -108,7 +160,7 @@ def validate_region(region: str) -> pd.DataFrame:
         for idx in big_gaps.index[:3]:  # show first 3 gaps
             t_before = df_clean["timestamp"].iloc[idx - 1]
             t_after  = df_clean["timestamp"].iloc[idx]
-            print(f"          {t_before} → {t_after}  ({time_diffs.iloc[idx]})")
+            print(f"          {t_before} → {t_after}  ({gap_hours.iloc[idx]:.0f}h gap)")
     else:
         print(f"  [OK] No timestamp gaps > 2 hours")
 
@@ -119,6 +171,12 @@ def validate_region(region: str) -> pd.DataFrame:
     print(f"  Rows kept:    {len(df_clean):,}")
     print(f"  Load range:   {df_clean['load_mw'].min():,.0f} – {df_clean['load_mw'].max():,.0f} MW")
     print(f"  Date range:   {df_clean['timestamp'].min()} → {df_clean['timestamp'].max()}")
+
+    # ── Final contract check ──────────────────────────────────────────────────
+    # After cleaning, the data MUST satisfy the Pandera schema. If it doesn't,
+    # cleaning missed something — raise loudly instead of saving bad data.
+    validate(df_clean, region)
+    print(f"  [PASS] Pandera contract satisfied")
 
     return df_clean
 

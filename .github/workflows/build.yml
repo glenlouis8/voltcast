@@ -1,0 +1,37 @@
+# build.yml — MANUAL full rebuild.
+#
+# Runs `pipeline.py build`: train transformer + lstm for all 4 regions, crown
+# champions in DagsHub, save drift references, generate first forecasts.
+#
+# No schedule on purpose — you only rebuild from scratch when you wipe DagsHub
+# or change the model architecture. Trigger it by hand from the Actions tab.
+
+name: build
+
+on:
+  workflow_dispatch: {}        # manual only — no cron
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120       # 8 model trainings — give it room
+    env:
+      EIA_API_KEY:           ${{ secrets.EIA_API_KEY }}
+      DAGSHUB_REPO_OWNER:    ${{ secrets.DAGSHUB_REPO_OWNER }}
+      DAGSHUB_REPO_NAME:     ${{ secrets.DAGSHUB_REPO_NAME }}
+      DAGSHUB_TOKEN:         ${{ secrets.DAGSHUB_TOKEN }}
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION:    ${{ secrets.AWS_DEFAULT_REGION }}
+      S3_BUCKET:             ${{ secrets.S3_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run full build pipeline
+        run: uv run python src/pipeline.py build

@@ -18,15 +18,19 @@ CLAUDE.md
 # Model checkpoints — regenerable, live in DagsHub registry
 checkpoints/
 
-# Data files — too large for git
+# Data files — too large for git, re-pulled / regenerated each run
 data/raw/
 data/features/
 data/forecasts/
+data/reference/
 
 # MLflow experiment tracking
 mlruns/
 mlflow.db
 mlartifacts/
+
+# Evidently drift reports — regenerable
+reports/
 
 # Mac junk
 .DS_Store

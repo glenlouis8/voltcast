@@ -16,6 +16,7 @@ import time
 import requests
 import pandas as pd
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # Load variables from .env file into environment automatically.
@@ -28,9 +29,19 @@ load_dotenv()
 # These are EIA's official "respondent" codes.
 REGIONS = ["CAL", "TEX", "PJM", "MISO"]
 
-# Pull data starting from this date.
-# 2015 gives us ~10 years of hourly data (~87,600 rows per region).
-START_DATE = "2015-01-01T00"
+# Rolling training window: always pull the last N years, not a fixed 2015 anchor.
+# WHY rolling: electricity demand drifts (EVs, solar, AC habits, climate). Old
+# patterns go stale. A fixed start would also make the dataset grow forever,
+# making every run slower + costlier. Rolling = constant size, always recent.
+# 5 years (~43,800 hours) covers several full seasonal cycles — enough to learn,
+# recent enough to stay relevant.
+TRAIN_WINDOW_YEARS = 5
+
+# Computed once at import: today minus the window. EIA wants "YYYY-MM-DDThh".
+# No end date in the query → EIA returns this start → newest available.
+START_DATE = (
+    datetime.now(timezone.utc) - timedelta(days=365 * TRAIN_WINDOW_YEARS)
+).strftime("%Y-%m-%dT%H")
 
 # EIA returns max 5000 rows per API call.
 # We'll loop (paginate) until we have all rows.
@@ -45,10 +56,13 @@ RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def fetch_region(region: str, api_key: str) -> pd.DataFrame:
+def fetch_region(region: str, api_key: str, start: str = START_DATE) -> pd.DataFrame:
     """
-    Fetch ALL hourly demand rows for one region from EIA API.
+    Fetch hourly demand rows for one region from EIA API, from `start` onward.
     Handles pagination automatically — keeps calling until no rows left.
+
+    `start` defaults to the full-history START_DATE. Pass a recent date
+    (e.g. "2026-05-01T00") to fetch only recent data — used by drift checks.
 
     Returns a DataFrame with columns: timestamp, load_mw
     """
@@ -68,7 +82,7 @@ def fetch_region(region: str, api_key: str) -> pd.DataFrame:
             "data[0]": "value",           # "value" = the MW number we want
             "facets[type][]": "D",        # D = Demand (not generation or interchange)
             "facets[respondent][]": region,
-            "start": START_DATE,
+            "start": start,
             "sort[0][column]": "period",  # sort by time, oldest first
             "sort[0][direction]": "asc",
             "length": PAGE_SIZE,

@@ -27,6 +27,7 @@ from pathlib import Path
 
 import torch
 import numpy as np
+import pandas as pd
 import mlflow
 from mlflow.tracking import MlflowClient
 
@@ -35,10 +36,30 @@ from evaluate import (
     get_scaler, denormalize, mae_mw,
     gather_test_arrays, predict_model, load_checkpoint,
 )
-from dataset import load_datasets
+from dataset import load_datasets, TRAIN_RATIO
 from mlflow_setup import setup_mlflow  # same destination as train.py
+from storage import save_reference
 
 CHECKPOINT_DIR = Path(__file__).parent.parent / "checkpoints"
+RAW_DIR        = Path(__file__).parent.parent / "data" / "raw"
+
+# Columns the drift check monitors — the reference snapshot must contain these.
+REFERENCE_COLS = ["load_mw", "rolling_mean_24"]
+
+
+def build_reference(region: str) -> pd.DataFrame:
+    """
+    Build the reference dataset = the training slice the champion learned from.
+    Contains the columns drift.py monitors. Saved to storage so drift can
+    compare fresh data against the champion's actual training distribution.
+    """
+    df = pd.read_parquet(RAW_DIR / f"{region}.parquet")
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    df["rolling_mean_24"] = df["load_mw"].rolling(24, min_periods=1).mean()
+
+    # Training slice only (first TRAIN_RATIO) — never val/test.
+    train_end = int(len(df) * TRAIN_RATIO)
+    return df.iloc[:train_end][REFERENCE_COLS].copy()
 
 # How much better (fraction) a challenger must be to dethrone the champion.
 PROMOTION_THRESHOLD = 0.01   # 1%
@@ -124,7 +145,10 @@ def run_registry(region: str) -> None:
     client.set_model_version_tag(registered_name, version.version, "model_type", challenger_name)
 
     # ── 4. Promotion decision ──
-    # Try to read the current champion alias. If none exists, this throws.
+    # became_champion tracks whether this version takes the crown — if so we
+    # also refresh the reference snapshot (drift compares against the champion's
+    # training data, so it must match whoever is champion).
+    became_champion = False
     try:
         champion = client.get_model_version_by_alias(registered_name, "champion")
         champion_mae = float(champion.tags["test_mae_mw"])
@@ -136,6 +160,7 @@ def run_registry(region: str) -> None:
 
         if improvement > PROMOTION_THRESHOLD:
             client.set_registered_model_alias(registered_name, "champion", version.version)
+            became_champion = True
             print(f"  PROMOTED → v{version.version} is the new champion "
                   f"(beat by >{PROMOTION_THRESHOLD*100:.0f}%)")
         else:
@@ -146,7 +171,14 @@ def run_registry(region: str) -> None:
     except Exception:
         # No champion yet — first model in. Crown it.
         client.set_registered_model_alias(registered_name, "champion", version.version)
+        became_champion = True
         print(f"\n  No existing champion. v{version.version} crowned as first champion.")
+
+    # ── 5. Refresh reference snapshot for drift (only if champion changed) ──
+    if became_champion:
+        ref = build_reference(region)
+        loc = save_reference(region, ref)
+        print(f"  Reference snapshot saved → {loc}")
 
     print("\nRegistry update complete.")
 
