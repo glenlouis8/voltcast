@@ -40,7 +40,7 @@ FEATURES_DIR  = Path(__file__).parent.parent / "data" / "features"
 
 # ── load the champion model from the registry ─────────────────────────────────
 
-def load_champion(region: str, device) -> torch.nn.Module:
+def load_champion(region: str, device) -> tuple[torch.nn.Module, dict]:
     """
     Fetch whichever model currently holds the 'champion' alias for this region.
 
@@ -48,6 +48,9 @@ def load_champion(region: str, device) -> torch.nn.Module:
         - Look up the champion version by alias (not by filename).
         - Read its 'model_type' tag to know which architecture to rebuild.
         - Download the saved .pt artifact and load the weights.
+
+    Returns (model, meta) where meta = {version, model_type, test_mae_mw} so the
+    frontend payload can show which model served and how good it is.
 
     This is the whole point of the registry: inference never hardcodes
     "transformer". It serves whoever is champion right now.
@@ -58,6 +61,11 @@ def load_champion(region: str, device) -> torch.nn.Module:
     # Get the version tagged 'champion'.
     champion = client.get_model_version_by_alias(registered_name, "champion")
     model_type = champion.tags["model_type"]          # "transformer" or "lstm"
+    meta = {
+        "version":     int(champion.version),
+        "model_type":  model_type,
+        "test_mae_mw": float(champion.tags.get("test_mae_mw", 0)),
+    }
     print(f"  Champion: {registered_name} v{champion.version} ({model_type})")
 
     # Download the artifact folder for this version to a local cache path.
@@ -73,7 +81,7 @@ def load_champion(region: str, device) -> torch.nn.Module:
         model = TemporalTransformer(input_dim=len(FEATURE_COLS))
 
     model.load_state_dict(torch.load(ckpt_file, map_location=device))
-    return model.to(device)
+    return model.to(device), meta
 
 
 # ── main forecast routine ─────────────────────────────────────────────────────
@@ -84,7 +92,7 @@ def forecast(region: str) -> None:
     print(f"Device: {device}")
     print(f"Forecasting next 24h: {region}\n")
 
-    model = load_champion(region, device)
+    model, champ_meta = load_champion(region, device)
     model.eval()
 
     # ── load the feature matrix, grab the LATEST 168 hours ──
@@ -124,8 +132,21 @@ def forecast(region: str) -> None:
         "predicted_load_mw": preds_mw,
     })
 
-    # save_forecast writes to S3 if configured, else local disk.
-    location = save_forecast(region, out)
+    # Build the rich frontend payload: champion meta + when generated + rows.
+    # One fetch gives the Vercel app everything it needs to render.
+    payload = {
+        "region":       region,
+        "generated_at": pd.Timestamp.utcnow().isoformat(),
+        "champion":     champ_meta,
+        "forecast": [
+            {"timestamp": ts.isoformat(), "predicted_load_mw": float(mw)}
+            for ts, mw in zip(future_ts, preds_mw)
+        ],
+    }
+
+    # save_forecast writes parquet (internal) + the rich JSON (frontend),
+    # to S3 if configured, else local disk.
+    location = save_forecast(region, out, payload=payload)
 
     print(f"\n  Forecast window: {future_ts[0]} → {future_ts[-1]}")
     print(f"  Predicted load:  {preds_mw.min():,.0f} – {preds_mw.max():,.0f} MW")

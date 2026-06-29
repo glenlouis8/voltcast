@@ -20,6 +20,7 @@ Why a fallback? Local dev needs no cloud. CI just sets the secrets. Same code.
 
 import io
 import os
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -73,15 +74,15 @@ def _save(prefix: str, region: str, df: pd.DataFrame) -> str:
     return str(path)
 
 
-def _save_json(prefix: str, region: str, df: pd.DataFrame) -> str:
+def _save_json(prefix: str, region: str, payload: dict) -> str:
     """
-    Save df as JSON (S3 or local) so a browser frontend (Vercel) can fetch it
-    directly — browsers can't read parquet. orient="records" → a plain list of
-    row objects; date_format="iso" → timestamps as readable ISO strings.
+    Save a dict as JSON (S3 or local) so a browser frontend (Vercel) can fetch
+    it directly — browsers can't read parquet. The frontend gets everything in
+    one request: champion metadata + the 24h forecast rows.
     """
     bucket = _bucket()
     filename = f"{region}.json"
-    body = df.to_json(orient="records", date_format="iso")
+    body = json.dumps(payload)
 
     if bucket:
         key = f"{prefix}/{filename}"
@@ -120,15 +121,20 @@ def _load(prefix: str, region: str) -> pd.DataFrame | None:
 
 # ── forecasts ─────────────────────────────────────────────────────────────────
 
-def save_forecast(region: str, df: pd.DataFrame) -> str:
+def save_forecast(region: str, df: pd.DataFrame, payload: dict | None = None) -> str:
     """
     Save a region's 24h forecast in BOTH formats:
         - parquet → for internal reuse (dashboard, re-loading in Python)
         - JSON    → for the Vercel frontend to fetch directly from S3
-    Returns the parquet location (the canonical one).
+
+    `payload` is the rich frontend object (champion meta + forecast rows). When
+    omitted, the JSON is just the forecast rows (keeps callers without metadata
+    working). Returns the parquet location (the canonical one).
     """
     location = _save(FORECAST_PREFIX, region, df)
-    _save_json(FORECAST_PREFIX, region, df)   # browser-readable copy
+    if payload is None:
+        payload = {"forecast": json.loads(df.to_json(orient="records", date_format="iso"))}
+    _save_json(FORECAST_PREFIX, region, payload)   # browser-readable copy
     return location
 
 
