@@ -92,6 +92,10 @@ def mode_retrain() -> None:
     MAX_CHAMPION_AGE_DAYS (or there's no champion). drift.py pulls its own recent
     window, so we only prep_data() for regions that actually need retraining.
     """
+    # Pull fresh data once up front so drift.py has raw parquet for its
+    # fallback reference path (used when no champion snapshot exists yet).
+    prep_data()
+
     retrained = []
     for r in REGIONS:
         drifted = run("drift.py", "--country", r, allow_fail=True) != 0  # exit 1 = drift
@@ -109,7 +113,6 @@ def mode_retrain() -> None:
 
         reason = "drift" if drifted else why_age
         print(f"  {r}: RETRAIN ({reason}).")
-        prep_data()
         run("train.py", "--model", "transformer", "--country", r)
         run("train.py", "--model", "lstm",        "--country", r)
         run("registry.py", "--country", r)
