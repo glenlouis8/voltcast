@@ -15,6 +15,9 @@ wheels/
 # Claude instructions — keep local, never commit
 CLAUDE.md
 
+# Build plan — local notes, not tracked
+BUILD_PLAN.md
+
 # Model checkpoints — regenerable, live in DagsHub registry
 checkpoints/
 
