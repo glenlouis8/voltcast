@@ -9,7 +9,7 @@ name: forecast
 
 on:
   schedule:
-    - cron: "0 * * * *"      # every hour, on the hour (UTC)
+    - cron: "13 * * * *"     # every hour at :13 (UTC). Odd off-peak minute dodges GitHub's top-of-hour queue congestion.
   workflow_dispatch: {}        # "Run workflow" button for manual testing
 
 jobs:
