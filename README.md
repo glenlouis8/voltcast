@@ -133,7 +133,7 @@ voltcast/
 │   ├── storage.py      # S3-or-local I/O (parquet + JSON)
 │   ├── mlflow_setup.py # DagsHub-or-local MLflow config
 │   └── pipeline.py     # orchestrator: build / forecast / retrain
-├── dashboard/app.py    # Streamlit dashboard (optional local view)
+├── frontend/           # Next.js dashboard (Vercel); reads private S3 via a server route
 ├── .github/workflows/  # forecast · retrain · build
 └── pyproject.toml      # deps (managed with uv)
 ```
@@ -157,8 +157,16 @@ uv run python src/ingestion.py
 uv run python src/train.py --model transformer --country CAL
 uv run python src/evaluate.py --country CAL
 uv run python src/drift.py --country CAL
+```
 
-uv run streamlit run dashboard/app.py     # local dashboard
+The dashboard is a Next.js app in `frontend/`, deployed on Vercel. It fetches
+forecasts through a server route (`/api/forecast/<region>`) that reads the
+private S3 bucket with server-side AWS credentials — keys never reach the browser.
+
+```bash
+cd frontend
+npm install
+npm run dev    # http://localhost:3000 (needs AWS creds in frontend/.env.local)
 ```
 
 ### Configuration (`.env`)
@@ -180,7 +188,7 @@ Everything has a **local fallback** — with no cloud config, MLflow uses local 
 
 ## Tech Stack
 
-**PyTorch** · **MLflow / DagsHub** · **Evidently** · **Pandera** · **AWS S3 (boto3)** · **GitHub Actions** · **Streamlit** · **uv** · **EIA Open Data API**
+**PyTorch** · **MLflow / DagsHub** · **Evidently** · **Pandera** · **AWS S3 (boto3)** · **GitHub Actions** · **Next.js / Vercel** · **uv** · **EIA Open Data API**
 
 ---
 
