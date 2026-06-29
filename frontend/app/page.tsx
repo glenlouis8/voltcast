@@ -37,6 +37,16 @@ const REGION_NAMES: Record<string, string> = {
   MISO: "Midwest",
 };
 
+// Each grid's own clock. Stored timestamps are UTC; we render them in the
+// region's local time so "evening peak" lands where a reader expects.
+// IANA names handle DST automatically.
+const REGION_TZ: Record<string, { zone: string; abbr: string }> = {
+  CAL: { zone: "America/Los_Angeles", abbr: "PT" },
+  TEX: { zone: "America/Chicago", abbr: "CT" },
+  PJM: { zone: "America/New_York", abbr: "ET" },
+  MISO: { zone: "America/Chicago", abbr: "CT" },
+};
+
 function fmtMW(n: number): string {
   return Math.round(n).toLocaleString() + " MW";
 }
@@ -79,15 +89,27 @@ export default function Home() {
     };
   }, [region]);
 
-  // Prep chart data: short hour label + value.
+  // Prep chart data: hour label in the region's own timezone + value.
+  // 24h crosses local midnight, so anchor the day: show weekday on the first
+  // tick and again at each "00" so the wrap is readable.
+  const tz = REGION_TZ[region];
   const chartData =
-    data?.forecast.map((row) => ({
-      hour: new Date(row.timestamp).toLocaleTimeString([], {
+    data?.forecast.map((row, i) => {
+      const d = new Date(row.timestamp);
+      const hh = d.toLocaleTimeString("en-US", {
+        timeZone: tz.zone,
         hour: "2-digit",
         hour12: false,
-      }),
-      mw: row.predicted_load_mw,
-    })) ?? [];
+      });
+      const day = d.toLocaleDateString("en-US", {
+        timeZone: tz.zone,
+        weekday: "short",
+      });
+      return {
+        hour: i === 0 || hh === "00" ? `${day} ${hh}` : hh,
+        mw: row.predicted_load_mw,
+      };
+    }) ?? [];
 
   const peak = data ? Math.max(...data.forecast.map((r) => r.predicted_load_mw)) : 0;
   const trough = data ? Math.min(...data.forecast.map((r) => r.predicted_load_mw)) : 0;
@@ -154,9 +176,18 @@ export default function Home() {
 
           {/* forecast chart */}
           <div className="panel">
-            <h2>Next 24 hours — {REGION_NAMES[region]}</h2>
+            <h2>
+              Next 24 hours — {REGION_NAMES[region]}{" "}
+              <span className="tz">(times in {tz.abbr})</span>
+            </h2>
             <div className="meta">
-              Generated {new Date(data.generated_at).toLocaleString()} UTC
+              Generated{" "}
+              {new Date(data.generated_at).toLocaleString("en-US", {
+                timeZone: "UTC",
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}{" "}
+              UTC
             </div>
             <ResponsiveContainer width="100%" height={360}>
               <LineChart data={chartData} margin={{ top: 10, right: 20, bottom: 0, left: 10 }}>

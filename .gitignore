@@ -37,3 +37,7 @@ reports/
 
 # Mac junk
 .DS_Store
+
+# personal social drafts
+linkedin_post.txt
+tweet.txt

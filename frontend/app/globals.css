@@ -124,6 +124,11 @@ body {
   font-size: 13px;
   margin-bottom: 20px;
 }
+.panel h2 .tz {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 400;
+}
 
 /* states */
 .state {
