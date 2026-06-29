@@ -105,7 +105,13 @@ def run_registry(region: str) -> None:
 
     challenger_name = min(scores, key=scores.get)   # key with smallest MAE
     challenger_mae  = scores[challenger_name]
-    print(f"\n  Challenger: {challenger_name} ({challenger_mae:,.0f} MW)")
+
+    # WAPE = error as a % of typical load, both measured on the SAME test set.
+    # MAE is mean|error| in MW; dividing by the test set's mean load turns it
+    # into a unitless % so regions of different sizes compare fairly. Same data
+    # top and bottom — that's what makes it honest.
+    challenger_wape = challenger_mae / actuals_mw.mean() * 100
+    print(f"\n  Challenger: {challenger_name} ({challenger_mae:,.0f} MW | WAPE {challenger_wape:.2f}%)")
 
     # ── 3. Register the challenger as a new model version ──
     registered_name = f"voltcast-{region}"
@@ -123,6 +129,7 @@ def run_registry(region: str) -> None:
     ckpt_path = CHECKPOINT_DIR / f"{region}_{challenger_name}.pt"
     with mlflow.start_run(run_name=f"registry-{region}") as run:
         mlflow.log_metric("test_mae_mw", challenger_mae)
+        mlflow.log_metric("test_wape", challenger_wape)
         mlflow.log_param("challenger_model", challenger_name)
         mlflow.log_artifact(str(ckpt_path), artifact_path="model")
 
@@ -142,6 +149,7 @@ def run_registry(region: str) -> None:
     # Store the test MAE on the version itself (as a tag) so we can compare
     # champion vs challenger later without re-evaluating.
     client.set_model_version_tag(registered_name, version.version, "test_mae_mw", str(challenger_mae))
+    client.set_model_version_tag(registered_name, version.version, "test_wape", str(challenger_wape))
     client.set_model_version_tag(registered_name, version.version, "model_type", challenger_name)
 
     # ── 4. Promotion decision ──

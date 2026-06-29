@@ -65,6 +65,7 @@ def load_champion(region: str, device) -> tuple[torch.nn.Module, dict]:
         "version":     int(champion.version),
         "model_type":  model_type,
         "test_mae_mw": float(champion.tags.get("test_mae_mw", 0)),
+        "test_wape":   float(champion.tags.get("test_wape", 0)),
     }
     print(f"  Champion: {registered_name} v{champion.version} ({model_type})")
 

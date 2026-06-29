@@ -16,6 +16,7 @@ type Champion = {
   version: number;
   model_type: string;
   test_mae_mw: number;
+  test_wape: number;
 };
 type ForecastRow = {
   timestamp: string;
@@ -38,6 +39,10 @@ const REGION_NAMES: Record<string, string> = {
 
 function fmtMW(n: number): string {
   return Math.round(n).toLocaleString() + " MW";
+}
+
+function fmtPct(n: number): string {
+  return n > 0 ? n.toFixed(2) + "%" : "—";
 }
 
 export default function Home() {
@@ -106,7 +111,7 @@ export default function Home() {
             className={`tab ${r === region ? "active" : ""}`}
             onClick={() => setRegion(r)}
           >
-            {r}
+            {REGION_NAMES[r]}
           </button>
         ))}
       </div>
@@ -132,6 +137,10 @@ export default function Home() {
             <div className="card">
               <div className="label">Test MAE</div>
               <div className="value accent">{fmtMW(data.champion.test_mae_mw)}</div>
+            </div>
+            <div className="card">
+              <div className="label">Test WAPE</div>
+              <div className="value accent">{fmtPct(data.champion.test_wape)}</div>
             </div>
             <div className="card">
               <div className="label">Peak</div>
