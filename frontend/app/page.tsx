@@ -36,9 +36,6 @@ const REGION_NAMES: Record<string, string> = {
   MISO: "Midwest",
 };
 
-// Base URL of the public S3 bucket. Set in Vercel env / .env.local.
-const S3_BASE = process.env.NEXT_PUBLIC_S3_BASE_URL ?? "";
-
 function fmtMW(n: number): string {
   return Math.round(n).toLocaleString() + " MW";
 }
@@ -55,7 +52,9 @@ export default function Home() {
     setError(null);
     setData(null);
 
-    fetch(`${S3_BASE}/forecasts/${region}.json`, { cache: "no-store" })
+    // Hits our own server route (the middleman), which reads private S3.
+    // Browser never touches AWS directly.
+    fetch(`/api/forecast/${region}`, { cache: "no-store" })
       .then((r) => {
         if (!r.ok) throw new Error(`No forecast yet for ${region} (HTTP ${r.status})`);
         return r.json();
