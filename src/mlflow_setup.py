@@ -1,24 +1,7 @@
 """
-src/mlflow_setup.py
-
-One place that decides WHERE MLflow logs to. Every other file calls
-setup_mlflow() instead of hardcoding a tracking URI.
-
-Two modes, chosen automatically from environment variables:
-
-    1. DagsHub (cloud)  — if DAGSHUB_REPO_OWNER, DAGSHUB_REPO_NAME, and
-                          DAGSHUB_TOKEN are all set (in .env or CI secrets).
-                          Models + metrics go to your DagsHub MLflow server.
-
-    2. Local sqlite     — fallback if those are missing. Lets you keep
-                          working offline with no cloud account.
-
-Why env-driven? Local dev needs no internet; cloud CI just sets the secrets.
-Same code path, no edits to switch.
-
-DagsHub auth uses standard MLflow env vars:
-    MLFLOW_TRACKING_USERNAME = your DagsHub username
-    MLFLOW_TRACKING_PASSWORD = your DagsHub token
+Decides where MLflow logs: DagsHub cloud when DAGSHUB_REPO_OWNER/REPO_NAME/TOKEN
+are set (.env or CI secrets), else a local sqlite file for offline dev. Every
+script calls setup_mlflow() instead of hardcoding a tracking URI.
 """
 
 import os

@@ -1,21 +1,8 @@
 """
-src/storage.py
-
-One place that decides WHERE forecast files live: S3 if configured, local
-folder if not. Every file that reads/writes forecasts calls these helpers
-instead of touching disk or S3 directly.
-
-Two modes, chosen from environment variables:
-
-    1. S3 (cloud)  — if S3_BUCKET + AWS creds are set (.env or CI secrets).
-                     Forecasts go to s3://<bucket>/forecasts/<region>.parquet.
-                     CI writes them; the dashboard/API read them. Survives the
-                     ephemeral GitHub Actions runner being wiped.
-
-    2. Local       — fallback if S3 isn't configured. Writes to data/forecasts/.
-                     Lets you work offline with no AWS account.
-
-Why a fallback? Local dev needs no cloud. CI just sets the secrets. Same code.
+Decides where forecast/reference files live: S3 when S3_BUCKET + AWS creds are
+set (CI writes, dashboard reads, survives the ephemeral runner), else a local
+data/ folder for offline dev. Callers use these helpers instead of touching disk
+or S3 directly.
 """
 
 import io
