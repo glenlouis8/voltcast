@@ -116,6 +116,16 @@ export default function Home() {
   const peak = data ? Math.max(...data.forecast.map((r) => r.predicted_load_mw)) : 0;
   const trough = data ? Math.min(...data.forecast.map((r) => r.predicted_load_mw)) : 0;
 
+  const nextHour = data?.forecast[0] ?? null;
+  const nextHourLabel = nextHour
+    ? new Date(nextHour.timestamp).toLocaleTimeString("en-US", {
+        timeZone: "UTC",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      }) + " UTC"
+    : null;
+
   return (
     <main className="max-w-[1000px] mx-auto px-5 pt-10 pb-20">
       <div className="flex items-baseline gap-3 flex-wrap mb-1.5">
@@ -155,6 +165,22 @@ export default function Home() {
 
       {data && !loading && !error && (
         <>
+          {/* next-hour hero */}
+          {nextHour && (
+            <div className="bg-panel border border-accent/40 rounded-2xl px-6 py-5 mb-5 flex items-center justify-between gap-4 flex-wrap">
+              <div>
+                <div className="text-muted text-xs uppercase tracking-wider mb-1">Next hour load</div>
+                <div className="text-4xl font-bold text-accent tabular">
+                  {fmtMW(nextHour.predicted_load_mw)}
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="text-muted text-xs uppercase tracking-wider mb-1">Forecast for</div>
+                <div className="text-lg font-semibold">{nextHourLabel}</div>
+              </div>
+            </div>
+          )}
+
           {/* champion + stat cards */}
           <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3.5 mb-6">
             <Card
