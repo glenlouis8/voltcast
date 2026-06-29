@@ -208,6 +208,46 @@ export default function Home() {
               </LineChart>
             </ResponsiveContainer>
           </div>
+
+          {/* hourly table — same UTC data as the chart, exact numbers */}
+          <div className="panel">
+            <h2>
+              Hourly forecast <span className="tz">(UTC)</span>
+            </h2>
+            <div className="table-wrap">
+              <table className="forecast-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th className="num">Predicted load</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.forecast.map((row) => {
+                    const d = new Date(row.timestamp);
+                    const isPeak = row.predicted_load_mw === peak;
+                    const isTrough = row.predicted_load_mw === trough;
+                    return (
+                      <tr key={row.timestamp}>
+                        <td>
+                          {d.toLocaleString("en-US", {
+                            timeZone: "UTC",
+                            weekday: "short",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                            hour12: false,
+                          })}
+                          {isPeak && <span className="tag peak">peak</span>}
+                          {isTrough && <span className="tag trough">trough</span>}
+                        </td>
+                        <td className="num">{fmtMW(row.predicted_load_mw)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </>
       )}
 

@@ -129,6 +129,61 @@ body {
   font-size: 13px;
   font-weight: 400;
 }
+.panel + .panel {
+  margin-top: 20px;
+}
+
+/* hourly table */
+.table-wrap {
+  margin-top: 16px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.forecast-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+.forecast-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 8px 12px;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.forecast-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.forecast-table tr:last-child td {
+  border-bottom: none;
+}
+.forecast-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.forecast-table .tag {
+  margin-left: 8px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.forecast-table .tag.peak {
+  background: rgba(255, 210, 63, 0.15);
+  color: var(--accent);
+}
+.forecast-table .tag.trough {
+  background: rgba(139, 149, 173, 0.15);
+  color: var(--muted);
+}
 
 /* states */
 .state {
