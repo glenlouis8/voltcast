@@ -26,6 +26,8 @@ Ablation on the **untouched test set** (latest 15% of data, never seen in traini
 | LSTM (from scratch) | 2,502 MW | 7.68% | −60% (worse) |
 | **Transformer (from scratch)** | **1,050 MW** | **3.24%** | **+32.8% better** |
 
+*Numbers are a snapshot from one training run. `ingestion.py` re-pulls fresh EIA data every run, so exact figures drift slightly over time — the ranking (Transformer < Naive < LSTM error) holds consistently.*
+
 The Transformer is the served **champion** in every region. The ablation is the proof: a strong naive baseline keeps the model honest, and the Transformer clearly beats it.
 
 ---
