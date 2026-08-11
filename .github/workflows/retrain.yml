@@ -1,8 +1,9 @@
 # retrain.yml — WEEKLY drift/staleness watchdog.
 #
-# Runs `pipeline.py retrain`: per region, check drift (drift.py) + champion age.
-# Retrain only regions that drifted OR whose champion is older than the age cap.
-# Clean + fresh regions are skipped (no compute wasted).
+# Runs `pipeline.py retrain --region <r>`: check drift (drift.py) + champion age
+# for one region, retrain only if it drifted or its champion is stale. One job
+# per region via matrix strategy — they run in parallel, so one region's slow
+# training can't stack onto another's and blow a single job's timeout.
 
 name: retrain
 
@@ -13,6 +14,10 @@ on:
 
 jobs:
   retrain:
+    strategy:
+      fail-fast: false         # one region's failure shouldn't cancel the others
+      matrix:
+        region: [CAL, TEX, PJM, MISO]
     runs-on: ubuntu-latest
     timeout-minutes: 60        # training is heavier than forecasting
     env:
@@ -24,6 +29,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION:    ${{ secrets.AWS_DEFAULT_REGION }}
       S3_BUCKET:             ${{ secrets.S3_BUCKET }}
+      PYTHONUNBUFFERED:      "1"  # stream logs live instead of batching in ~4KB chunks
     steps:
       - uses: actions/checkout@v4
 
@@ -34,4 +40,4 @@ jobs:
         run: uv sync --frozen
 
       - name: Run retrain pipeline
-        run: uv run python src/pipeline.py retrain
+        run: uv run python src/pipeline.py retrain --region ${{ matrix.region }}

@@ -86,16 +86,20 @@ def champion_age_days(region: str) -> float | None:
     return (time.time() - champ.creation_timestamp / 1000) / 86400
 
 
-def mode_retrain() -> None:
+def mode_retrain(regions: list[str] = REGIONS) -> None:
     """
     Weekly watchdog. Retrain a region if it drifted OR its champion is older than
     MAX_CHAMPION_AGE_DAYS (or there's no champion). drift.py pulls its own recent
     window, so we only prep_data() for regions that actually need retraining —
     running it unconditionally for all 4 regions every week is what blew the
     retrain job past its 60-minute timeout.
+
+    `regions` defaults to all 4, but the GitHub Actions workflow calls this with
+    one region per matrix job (`--region`) so training runs in parallel instead
+    of stacking 4 regions' training time into a single 60-minute job.
     """
     retrained = []
-    for r in REGIONS:
+    for r in regions:
         drifted = run("drift.py", "--country", r, allow_fail=True) != 0  # exit 1 = drift
 
         age = champion_age_days(r)
@@ -129,10 +133,20 @@ def main():
         choices=["build", "forecast", "retrain"],
         help="build = full rebuild | forecast = daily 24h | retrain = weekly drift-gated",
     )
+    parser.add_argument(
+        "--region",
+        choices=REGIONS,
+        default=None,
+        help="retrain mode only: check/retrain just this region (used by the "
+             "per-region matrix job in retrain.yml). Default: all 4 regions.",
+    )
     args = parser.parse_args()
 
     print(f"\n{'='*60}\n  VOLTCAST PIPELINE - mode: {args.mode}\n{'='*60}")
-    {"build": mode_build, "forecast": mode_forecast, "retrain": mode_retrain}[args.mode]()
+    if args.mode == "retrain":
+        mode_retrain(regions=[args.region] if args.region else REGIONS)
+    else:
+        {"build": mode_build, "forecast": mode_forecast}[args.mode]()
     print(f"\n{'='*60}\n  PIPELINE DONE - {args.mode}\n{'='*60}")
 
 
