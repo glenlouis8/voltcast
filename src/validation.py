@@ -124,9 +124,17 @@ def validate_region(region: str) -> pd.DataFrame:
 
 
 def main():
-    print("Running validation on all regions...")
+    import argparse
 
-    for region in REGIONS:
+    parser = argparse.ArgumentParser(description="Validate raw region data.")
+    parser.add_argument("--region", choices=REGIONS, default=None,
+                         help="only validate this region (default: all 4)")
+    args = parser.parse_args()
+    regions = [args.region] if args.region else REGIONS
+
+    print(f"Running validation on {'all regions' if not args.region else args.region}...")
+
+    for region in regions:
         df_clean = validate_region(region)
         out_path = RAW_DIR / f"{region}.parquet"
         df_clean.to_parquet(out_path, index=False)

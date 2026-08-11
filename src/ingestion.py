@@ -102,13 +102,21 @@ def fetch_region(region: str, api_key: str, start: str = START_DATE) -> pd.DataF
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Pull EIA hourly demand data.")
+    parser.add_argument("--region", choices=REGIONS, default=None,
+                         help="only ingest this region (default: all 4)")
+    args = parser.parse_args()
+    regions = [args.region] if args.region else REGIONS
+
     api_key = os.getenv("EIA_API_KEY")
     if not api_key:
         raise ValueError("EIA_API_KEY not set. Run: export EIA_API_KEY=your_key_here")
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    for region in REGIONS:
+    for region in regions:
         print(f"\nRegion: {region}")
         df = fetch_region(region, api_key)
 

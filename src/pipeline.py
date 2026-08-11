@@ -43,11 +43,16 @@ def run(script: str, *args: str, allow_fail: bool = False) -> int:
     return result.returncode
 
 
-def prep_data() -> None:
-    """Pull fresh data, validate, build features. Each loops all regions itself."""
-    run("ingestion.py")
-    run("validation.py")
-    run("features.py")
+def prep_data(region: str | None = None) -> None:
+    """
+    Pull fresh data, validate, build features. Each script loops all regions by
+    default; pass `region` to scope all three to just that one (used by the
+    retrain matrix jobs so a single region's job doesn't re-pull all 4).
+    """
+    args = ["--region", region] if region else []
+    run("ingestion.py", *args)
+    run("validation.py", *args)
+    run("features.py", *args)
 
 
 def mode_build() -> None:
@@ -115,7 +120,7 @@ def mode_retrain(regions: list[str] = REGIONS) -> None:
 
         reason = "drift" if drifted else why_age
         print(f"  {r}: RETRAIN ({reason}).")
-        prep_data()
+        prep_data(r)
         run("train.py", "--model", "transformer", "--country", r)
         run("train.py", "--model", "lstm",        "--country", r)
         run("registry.py", "--country", r)

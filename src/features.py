@@ -129,7 +129,15 @@ def build_features(region: str) -> None:
 
 
 def main():
-    for region in REGIONS:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build feature matrices.")
+    parser.add_argument("--region", choices=REGIONS, default=None,
+                         help="only build features for this region (default: all 4)")
+    args = parser.parse_args()
+    regions = [args.region] if args.region else REGIONS
+
+    for region in regions:
         build_features(region)
     print("\nFeature engineering complete.")
 
