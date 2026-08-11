@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from evidently import Report, Dataset, DataDefinition
 from evidently.presets import DataDriftPreset
 
-from ingestion import fetch_region
+from ingestion import fetch_region, START_DATE
 from storage import load_reference
 
 load_dotenv()
@@ -47,18 +47,26 @@ def build_frames(region: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     current = a fresh EIA pull of the last ~30 days. Comparing fresh data to the
     stored tail of the same file would be comparing data to itself.
     """
+    api_key = os.environ["EIA_API_KEY"]
+
     reference = load_reference(region)
     if reference is not None:
         reference = reference[MONITOR_COLS].copy()
         print(f"  Reference: loaded champion snapshot ({len(reference):,} rows)")
     else:
-        # no snapshot yet — rebuild the train slice from local raw
-        stored = add_rolling(pd.read_parquet(RAW_DIR / f"{region}.parquet"))
+        # No snapshot yet — CI runners are ephemeral, so data/raw/ may not exist
+        # here even if pipeline.py's ingestion step already ran this week. Pull
+        # full history ourselves instead of depending on run order.
+        raw_path = RAW_DIR / f"{region}.parquet"
+        if raw_path.exists():
+            stored = add_rolling(pd.read_parquet(raw_path))
+        else:
+            print(f"  Reference: no local raw for {region}, pulling full history...")
+            stored = add_rolling(fetch_region(region, api_key, start=START_DATE))
         train_end = int(len(stored) * TRAIN_RATIO)
         reference = stored.iloc[:train_end][MONITOR_COLS].copy()
-        print(f"  Reference: no snapshot, rebuilt from local raw ({len(reference):,} rows)")
+        print(f"  Reference: no snapshot, rebuilt from raw ({len(reference):,} rows)")
 
-    api_key = os.environ["EIA_API_KEY"]
     # start before the window so the rolling mean has warmup rows
     start = (datetime.now(timezone.utc) - timedelta(hours=CURRENT_HOURS + 48)).strftime("%Y-%m-%dT%H")
     print(f"  Pulling fresh EIA data for {region} since {start}...")
@@ -76,7 +84,11 @@ def check_drift(region: str, save_html: bool = True) -> bool:
     ref_ds = Dataset.from_pandas(reference, data_definition=data_def)
     cur_ds = Dataset.from_pandas(current,   data_definition=data_def)
 
-    report = Report([DataDriftPreset()])
+    # num_method="ks" pins the K-S test explicitly — Evidently auto-selects a
+    # method by sample size/type otherwise, and for our row counts that means
+    # Wasserstein distance (unbounded), not a p-value. The threshold below
+    # (p < 0.05) is only meaningful if the value really is a K-S p-value.
+    report = Report([DataDriftPreset(num_method="ks")])
     result = report.run(current_data=cur_ds, reference_data=ref_ds)
     d = result.dict()
 

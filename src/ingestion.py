@@ -33,6 +33,7 @@ PAGE_SIZE = 5000  # EIA returns at most 5000 rows per call, so we paginate
 RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
 MAX_RETRIES = 5  # EIA occasionally times out or 502s under load; retry before giving up
+MAX_FETCH_SECONDS = 300  # hard ceiling per region: a bad EIA day must not eat the job's timeout
 
 
 def fetch_region(region: str, api_key: str, start: str = START_DATE) -> pd.DataFrame:
@@ -44,10 +45,17 @@ def fetch_region(region: str, api_key: str, start: str = START_DATE) -> pd.DataF
     url = "https://api.eia.gov/v2/electricity/rto/region-data/data/"
     all_rows = []
     offset = 0
+    fetch_start = time.monotonic()
 
     print(f"  Fetching {region}...")
 
     while True:
+        if time.monotonic() - fetch_start > MAX_FETCH_SECONDS:
+            raise TimeoutError(
+                f"{region}: exceeded {MAX_FETCH_SECONDS}s fetching from EIA "
+                f"({len(all_rows):,} rows so far) — API likely degraded, bailing out"
+            )
+
         params = {
             "api_key": api_key,
             "frequency": "hourly",
