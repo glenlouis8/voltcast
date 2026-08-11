@@ -33,6 +33,12 @@ CURRENT_HOURS = 720          # ~30 days counts as "current"
 MONITOR_COLS = ["load_mw", "rolling_mean_24"]
 DRIFT_SHARE_THRESHOLD = 0.5  # half or more of monitored columns drift -> drift
 
+# K-S significance grows with sample size — a 30k-row reference vs 720-row
+# current makes the test flag any trivial difference as p≈0. Cap the reference
+# so both sides are comparable and the test reflects real drift, not sample size.
+MAX_REFERENCE_ROWS = 2000
+REFERENCE_SAMPLE_SEED = 42
+
 
 def add_rolling(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -66,6 +72,10 @@ def build_frames(region: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         train_end = int(len(stored) * TRAIN_RATIO)
         reference = stored.iloc[:train_end][MONITOR_COLS].copy()
         print(f"  Reference: no snapshot, rebuilt from raw ({len(reference):,} rows)")
+
+    if len(reference) > MAX_REFERENCE_ROWS:
+        reference = reference.sample(MAX_REFERENCE_ROWS, random_state=REFERENCE_SAMPLE_SEED)
+        print(f"  Reference: sampled down to {MAX_REFERENCE_ROWS:,} rows (K-S sensitivity control)")
 
     # start before the window so the rolling mean has warmup rows
     start = (datetime.now(timezone.utc) - timedelta(hours=CURRENT_HOURS + 48)).strftime("%Y-%m-%dT%H")
