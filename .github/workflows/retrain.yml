@@ -19,7 +19,7 @@ jobs:
       matrix:
         region: [CAL, TEX, PJM, MISO]
     runs-on: ubuntu-latest
-    timeout-minutes: 60        # training is heavier than forecasting
+    timeout-minutes: 120       # transformer+lstm training runs ~55-60min per region on free CPU runners
     env:
       EIA_API_KEY:           ${{ secrets.EIA_API_KEY }}
       DAGSHUB_REPO_OWNER:    ${{ secrets.DAGSHUB_REPO_OWNER }}
