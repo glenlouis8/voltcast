@@ -121,8 +121,10 @@ def mode_retrain(regions: list[str] = REGIONS) -> None:
         reason = "drift" if drifted else why_age
         print(f"  {r}: RETRAIN ({reason}).")
         prep_data(r)
+        # lstm is ablation-only (mode_build trains it) — it has never once beaten
+        # transformer across any region, so retraining it weekly just doubles
+        # training time for no chance of a different champion.
         run("train.py", "--model", "transformer", "--country", r)
-        run("train.py", "--model", "lstm",        "--country", r)
         run("registry.py", "--country", r)
         run("inference.py", "--country", r)
         retrained.append(r)

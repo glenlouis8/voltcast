@@ -73,10 +73,14 @@ def run_registry(region: str) -> None:
     X_all, y_all = gather_test_arrays(test_ds)
     actuals_mw = denormalize(y_all, mean, std)
 
-    scores = {
-        "lstm":        test_mae_for("lstm",        region, X_all, actuals_mw, mean, std, device),
-        "transformer": test_mae_for("transformer", region, X_all, actuals_mw, mean, std, device),
-    }
+    # retrain.yml only trains transformer (lstm is ablation-only, see build mode)
+    # so its checkpoint won't exist on a fresh runner — score whichever of the
+    # two actually got trained this run instead of assuming both are present.
+    scores = {}
+    for name in ("lstm", "transformer"):
+        ckpt = CHECKPOINT_DIR / f"{region}_{name}.pt"
+        if ckpt.exists():
+            scores[name] = test_mae_for(name, region, X_all, actuals_mw, mean, std, device)
     for name, mae in scores.items():
         print(f"  {name:<12} test MAE: {mae:,.0f} MW")
 
