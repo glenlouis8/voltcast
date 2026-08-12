@@ -24,7 +24,7 @@ from evaluate import (
 )
 from dataset import load_datasets, TRAIN_RATIO
 from mlflow_setup import setup_mlflow
-from storage import save_reference
+from storage import save_reference, load_reference
 
 CHECKPOINT_DIR = Path(__file__).parent.parent / "checkpoints"
 RAW_DIR        = Path(__file__).parent.parent / "data" / "raw"
@@ -155,6 +155,15 @@ def run_registry(region: str) -> None:
         ref = build_reference(region)
         loc = save_reference(region, ref)
         print(f"  Reference snapshot saved -> {loc}")
+    elif load_reference(region) is None:
+        # Champion didn't change, but no reference exists yet — happens when a
+        # champion predates S3 being wired up (crowned locally, never backfilled)
+        # or already lost this bucket's snapshot some other way. Without this,
+        # drift.py falls back to a full-history rebuild forever, since a
+        # non-promoted run never otherwise touches the reference.
+        ref = build_reference(region)
+        loc = save_reference(region, ref)
+        print(f"  No reference existed -> backfilled -> {loc}")
 
     print("\nRegistry update complete.")
 
