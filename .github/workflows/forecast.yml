@@ -1,4 +1,4 @@
-# forecast.yml — DAILY-ish (hourly) 24h forecast robot.
+# forecast.yml — DAILY 24h forecast robot.
 #
 # Runs `pipeline.py forecast`: pull fresh EIA → validate → features →
 # each champion predicts next 24h → forecasts written to S3 (parquet + JSON).
@@ -9,7 +9,7 @@ name: forecast
 
 on:
   schedule:
-    - cron: "13 * * * *"     # every hour at :13 (UTC). Odd off-peak minute dodges GitHub's top-of-hour queue congestion.
+    - cron: "13 6 * * *"     # daily at 06:13 UTC. Odd off-peak minute dodges GitHub's top-of-hour queue congestion.
   workflow_dispatch: {}        # "Run workflow" button for manual testing
 
 jobs:
