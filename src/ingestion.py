@@ -33,7 +33,7 @@ PAGE_SIZE = 5000  # EIA returns at most 5000 rows per call, so we paginate
 RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
 MAX_RETRIES = 5  # EIA occasionally times out or 502s under load; retry before giving up
-MAX_FETCH_SECONDS = 300  # hard ceiling per region: a bad EIA day must not eat the job's timeout
+MAX_FETCH_SECONDS = 720  # hard ceiling per region: a slow EIA day can take ~10 min, a dead one must still fail
 
 
 def fetch_region(region: str, api_key: str, start: str = START_DATE) -> pd.DataFrame:
@@ -71,7 +71,7 @@ def fetch_region(region: str, api_key: str, start: str = START_DATE) -> pd.DataF
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                response = requests.get(url, params=params, timeout=30)
+                response = requests.get(url, params=params, timeout=60)
                 response.raise_for_status()
                 rows = response.json()["response"]["data"]
                 break
