@@ -21,7 +21,7 @@ import torch
 from mlflow.tracking import MlflowClient
 from torch.utils.data import DataLoader
 
-from dataset import make_datasets, rescale_demand
+from dataset import copy_yesterday_mae, make_datasets, rescale_demand
 from features import FEATURES_DIR
 from mlflow_setup import setup_mlflow
 from train import CHECKPOINT_DIR, build_model
@@ -103,7 +103,10 @@ def run_registry(region: str, dry_run: bool) -> None:
     # the test year is only used to REPORT how good the challenger is, never to decide
     test_mae, test_demand = score_mw(load_checkpoint(challenger_type, challenger_path), test_ds, data_scaler, data_scaler)
     test_wape = test_mae / test_demand * 100
+    # what "copy yesterday" scores on the same test year; drift.py compares against this later
+    naive_test_mae = copy_yesterday_mae(test_ds) * data_scaler["std"]
     print(f"  report card on test year: {test_mae:,.0f} MW ({test_wape:.2f}% of demand)")
+    print(f"  copy yesterday on the same year: {naive_test_mae:,.0f} MW")
 
     # 2. compare with the current champion, on the same validation year
     setup_mlflow()
@@ -143,7 +146,8 @@ def run_registry(region: str, dry_run: bool) -> None:
 
     for key, value in {
         "model_type": challenger_type, "val_mae_mw": challenger_val, "test_mae_mw": test_mae,
-        "test_wape": test_wape, "scaler_mean": data_scaler["mean"], "scaler_std": data_scaler["std"],
+        "test_wape": test_wape, "naive_test_mae_mw": naive_test_mae,
+        "scaler_mean": data_scaler["mean"], "scaler_std": data_scaler["std"],
     }.items():
         client.set_model_version_tag(registered_name, version.version, key, str(value))
 

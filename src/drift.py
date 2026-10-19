@@ -4,10 +4,15 @@ Is the champion still making good forecasts? If not, it should be retrained.
     python src/drift.py --region CAL
 
 How: download the last 60 days of real demand, make the champion forecast each
-day as if it were back then, and compare its mistakes with the real answers
-(which are known by now). Two signs of trouble:
-  - the mistakes are much bigger than on the test year (its "report card")
-  - the champion is now worse than just copying yesterday
+day as if it were back then, and compare with the real answers (known by now).
+
+Some seasons are just harder for every forecaster, so we don't judge the champion's
+error alone. We judge it RELATIVE to the simplest forecast, "copy yesterday":
+
+    ratio = champion error / copy-yesterday error
+
+At test time the champion had some ratio (say 0.75). If the ratio now is clearly
+worse than that, or the champion no longer beats copy-yesterday, it has gone stale.
 
 Exit code tells the pipeline what happened:
     0  = fine, keep the champion
@@ -23,7 +28,7 @@ import torch
 from mlflow.tracking import MlflowClient
 from torch.utils.data import DataLoader
 
-from dataset import FEATURE_COLS, FORECAST_HORIZON, WindowDataset
+from dataset import FEATURE_COLS, WindowDataset, copy_yesterday_mae
 from features import DEMAND_COLS, add_calendar_features, add_lag_features
 from ingestion import fetch_region
 from mlflow_setup import setup_mlflow
@@ -32,9 +37,9 @@ from validation import clean_frame
 
 EXIT_OK, EXIT_DRIFT = 0, 10
 
-RECENT_DAYS = 60            # 7 days are used up as history, the rest is scored
-MIN_WINDOWS = 24 * 14       # need at least 2 weeks of forecasts to judge fairly
-ERROR_LIMIT = 1.5           # drift if recent error is more than 1.5x the report card
+RECENT_DAYS = 60       # 7 days are used up as history, the rest is scored
+MIN_WINDOWS = 24 * 14  # need at least 2 weeks of forecasts to judge fairly
+RATIO_LIMIT = 1.25     # drift if the ratio is 25% worse than it was at test time
 
 
 def recent_windows(region: str, scaler: dict) -> WindowDataset:
@@ -55,9 +60,13 @@ def check_drift(region: str) -> bool:
         return True
 
     tags = champion.tags
+    if "naive_test_mae_mw" not in tags:
+        raise SystemExit(f"{region}: champion v{champion.version} has no copy-yesterday baseline saved. "
+                         "Run registry.py again to register a fresh one.")
     model_type = tags["model_type"]
     scaler = {"mean": float(tags["scaler_mean"]), "std": float(tags["scaler_std"])}
-    report_card = float(tags["test_mae_mw"])  # the champion's error on the test year
+    # how the champion compared with copy-yesterday on the test year
+    test_ratio = float(tags["test_mae_mw"]) / float(tags["naive_test_mae_mw"])
 
     folder = mlflow.artifacts.download_artifacts(champion.source)
     model = load_checkpoint(model_type, f"{folder}/{region}_{model_type}.pt").eval()
@@ -66,23 +75,23 @@ def check_drift(region: str) -> bool:
     if len(ds) < MIN_WINDOWS:
         raise SystemExit(f"{region}: only {len(ds)} recent forecasts to check, need {MIN_WINDOWS}")
 
-    model_error, yesterday_error, count = 0.0, 0.0, 0
+    model_error, count = 0.0, 0
     with torch.no_grad():
         for X, y in DataLoader(ds, batch_size=256, shuffle=False):
             model_error += (model(X) - y).abs().sum().item()
-            yesterday_error += (X[:, -FORECAST_HORIZON:, 0] - y).abs().sum().item()  # copy yesterday
             count += y.numel()
     recent_mae = model_error / count * scaler["std"]
-    yesterday_mae = yesterday_error / count * scaler["std"]
+    yesterday_mae = copy_yesterday_mae(ds) * scaler["std"]
 
-    ratio = recent_mae / report_card
-    worse_than_yesterday = recent_mae > yesterday_mae
-    drifted = ratio > ERROR_LIMIT or worse_than_yesterday
+    recent_ratio = recent_mae / yesterday_mae
+    worse_than_yesterday = recent_ratio >= 1.0
+    drifted = recent_ratio > test_ratio * RATIO_LIMIT or worse_than_yesterday
 
     print(f"\n{region}: champion v{champion.version} ({model_type}), checked on {len(ds):,} recent forecasts")
-    print(f"  recent error:      {recent_mae:>7,.0f} MW")
-    print(f"  report card:       {report_card:>7,.0f} MW   (recent is {ratio:.2f}x, limit {ERROR_LIMIT}x)")
-    print(f"  copy yesterday:    {yesterday_mae:>7,.0f} MW   ({'champion is WORSE' if worse_than_yesterday else 'champion is better'})")
+    print(f"  champion error:   {recent_mae:>7,.0f} MW")
+    print(f"  copy yesterday:   {yesterday_mae:>7,.0f} MW")
+    print(f"  ratio now: {recent_ratio:.2f} | at test time: {test_ratio:.2f} | limit: {test_ratio * RATIO_LIMIT:.2f} "
+          f"(lower is better, 1.00 = no better than copying yesterday)")
     print(f"  VERDICT: {'DRIFT -> retrain' if drifted else 'fine -> keep the champion'}")
     return drifted
 

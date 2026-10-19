@@ -68,6 +68,15 @@ class WindowDataset(Dataset):
         return X, y
 
 
+def copy_yesterday_mae(dataset: WindowDataset) -> float:
+    """Average mistake (in scaled units) of the simplest forecast: next 24 hours = last 24 hours."""
+    total, count = 0.0, 0
+    for X, y in DataLoader(dataset, batch_size=256, shuffle=False):
+        total += (X[:, -FORECAST_HORIZON:, 0] - y).abs().sum().item()  # column 0 = demand
+        count += y.numel()
+    return total / count
+
+
 def split_by_time(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Oldest 60% = train, next 20% = validation, newest 20% = test. Never shuffled."""
     n = len(df)
