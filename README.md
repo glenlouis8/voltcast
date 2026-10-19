@@ -1,6 +1,6 @@
 # ⚡ VoltCast — 24-Hour US Electricity Demand Forecasting
 
-End-to-end MLOps system that predicts the next **24 hours** of electricity demand for four major US grid regions — **California (CAL)**, **Texas (ERCOT/TEX)**, **PJM (Mid-Atlantic)**, and **MISO (Midwest)** — using a Transformer built from scratch in PyTorch.
+End-to-end MLOps system that predicts the next **24 hours** of electricity demand for four major US grid regions — **California (CAL)**, **Texas (ERCOT/TEX)**, **PJM (Mid-Atlantic)**, and **MISO (Midwest)** — using Transformer and LSTM models built from scratch in PyTorch.
 
 It is **serverless**: no always-on backend. Scheduled GitHub Actions pull fresh data, run the model, and publish forecasts. Models live in a hosted registry, forecasts in object storage, the frontend reads them directly.
 
@@ -10,51 +10,24 @@ It is **serverless**: no always-on backend. Scheduled GitHub Actions pull fresh 
 
 Grid operators must match electricity supply to demand every hour. Too little → blackouts. Too much → wasted money. VoltCast forecasts demand 24 hours ahead so that decision has data behind it — the same problem real ISOs solve, packaged as a clean, automated ML system.
 
-The goal was not just a model, but the **full production loop**: ingest → validate → train → evaluate → register → serve → monitor for drift → retrain. Every layer is built explicitly (no `Trainer`, no AutoML) so the engineering is visible.
+The goal was not just a model, but the **full production loop**: ingest → validate → train → evaluate → register → serve → monitor → retrain. Every layer is built explicitly (no `Trainer`, no AutoML) so the engineering is visible.
 
 ---
 
 ## Results
 
-Ablation on the **untouched test set** (latest 15% of data, never seen in training). Primary metric is **MAE in megawatts** — average absolute error per predicted hour.
+Scored on the **untouched test year** (the most recent 12 months, Oct 2025 – Oct 2026, never seen during training or model selection). The champion in each region is picked on a separate **validation year**, not on the test year. Primary metric is **MAE in megawatts** — the average size of the forecast's miss per predicted hour — also shown as a share of average demand.
 
-### California (CAL)
+| Region | Copy yesterday | Copy last week | LSTM | Transformer | Champion |
+|--------|---------------:|---------------:|-----:|------------:|:--------:|
+| California (CAL) | 1,642 MW (5.0%) | 2,696 MW (8.3%) | 1,316 MW (4.0%) | **1,236 MW (3.8%)** | Transformer |
+| Texas (TEX) | 2,419 MW (4.2%) | 4,446 MW (7.6%) | 2,153 MW (3.7%) | **2,041 MW (3.5%)** | Transformer |
+| PJM | 5,295 MW (5.3%) | 9,087 MW (9.1%) | 3,570 MW (3.6%) | **3,551 MW (3.6%)** | LSTM |
+| MISO | 3,290 MW (4.2%) | 5,832 MW (7.5%) | 2,088 MW (2.7%) | **2,021 MW (2.6%)** | LSTM |
 
-| Model | Test MAE | MAPE | vs. Naive |
-|-------|---------:|-----:|----------:|
-| Naive (repeat last 24h) | 1,562 MW | 4.89% | baseline |
-| LSTM (from scratch) | 2,502 MW | 7.68% | −60% (worse) |
-| **Transformer (from scratch)** | **1,050 MW** | **3.24%** | **+32.8% better** |
-
-### Texas (TEX)
-
-| Model | Test MAE | MAPE | vs. Naive |
-|-------|---------:|-----:|----------:|
-| Naive (repeat last 24h) | 2,511 MW | 4.47% | baseline |
-| LSTM (from scratch) | 8,330 MW | 13.55% | −232% (worse) |
-| **Transformer (from scratch)** | **1,906 MW** | **3.34%** | **+24.1% better** |
-
-### PJM (Mid-Atlantic)
-
-| Model | Test MAE | MAPE | vs. Naive |
-|-------|---------:|-----:|----------:|
-| Naive (repeat last 24h) | 5,048 MW | 5.12% | baseline |
-| LSTM (from scratch) | 9,368 MW | 8.93% | −86% (worse) |
-| **Transformer (from scratch)** | **3,261 MW** | **3.26%** | **+35.4% better** |
-
-### MISO (Midwest)
-
-| Model | Test MAE | MAPE | vs. Naive |
-|-------|---------:|-----:|----------:|
-| Naive (repeat last 24h) | 3,091 MW | 4.03% | baseline |
-| LSTM (from scratch) | 5,483 MW | 6.93% | −77% (worse) |
-| **Transformer (from scratch)** | **1,845 MW** | **2.37%** | **+40.3% better** |
-
-The Transformer is champion in all four regions, beating naive by 24–40%. LSTM loses to naive everywhere — the point of the ablation, not a bug: it proves the extra architecture complexity is what's earning the win, not just "any neural net."
-
-*Numbers are a snapshot from one training run. `ingestion.py` re-pulls fresh EIA data every run, so exact figures drift slightly over time — the ranking (Transformer < Naive < LSTM error) holds consistently.*
-
-The Transformer is the served **champion** in every region. The ablation is the proof: a strong naive baseline keeps the model honest, and the Transformer clearly beats it.
+- Both neural models beat both naive baselines in every region. The best model beats the best baseline by **16% (TEX) to 39% (MISO)**.
+- **Transformer vs LSTM is close.** The Transformer is ahead on the test year everywhere, but by 0.5%–6%, and in PJM it is a tie. In PJM and MISO the registry picked the LSTM because it scored better on the validation year; the champion is chosen on validation by design, so the test year stays an honest exam.
+- Numbers are a snapshot from one training run. Exact figures move when the data window moves.
 
 ---
 
@@ -62,7 +35,7 @@ The Transformer is the served **champion** in every region. The ablation is the 
 
 ```
                     ┌──────────────────────────────────────────────┐
-   GitHub Actions   │  pipeline.py  (build · forecast · retrain)    │
+   GitHub Actions   │  pipeline.py  (build · forecast · retrain)   │
    (cron, no server)│                                              │
                     │  ingestion → validation → features →         │
                     │  train → registry → inference / drift        │
@@ -71,8 +44,8 @@ The Transformer is the served **champion** in every region. The ablation is the 
               ┌─────────────────────┼─────────────────────┐
               ▼                     ▼                     ▼
         EIA API (data)      DagsHub (MLflow)          AWS S3
-        re-pulled,          models + champion         forecasts + drift
-        nothing stored      registry                  references (JSON)
+        re-pulled,          models + scalers +        forecasts
+        nothing stored      champion registry         (parquet + JSON)
                                                             │ reads
                                                             ▼
                                                    Vercel frontend
@@ -84,19 +57,21 @@ The Transformer is the served **champion** in every region. The ablation is the 
 | Thing | Home | Why |
 |-------|------|-----|
 | Code | GitHub | version control + CI |
-| Models + champion alias | DagsHub (hosted MLflow) | versioning, registry, promotion |
-| Forecasts + drift references | AWS S3 (parquet + JSON) | cheap files; CI writes, frontend reads |
+| Models, scalers, champion alias | DagsHub (hosted MLflow) | versioning, registry, promotion |
+| Forecasts | AWS S3 (parquet + JSON) | cheap files; CI writes, frontend reads |
 | Raw data | nowhere — re-pulled from EIA each run | always fresh, rolling 5-year window |
 
 ---
 
-## The Model
+## The Models
 
-A **TemporalTransformer**, built layer by layer in PyTorch (`src/model.py`):
+Two networks with identical input and output, so the comparison is fair.
+
+**TemporalTransformer** (`src/model.py`):
 
 ```
-Input  (batch, 168 hours, 13 features)
-  → Linear projection           13 → d_model=64
+Input  (batch, 168 hours, 10 features)
+  → Linear projection           10 → d_model=64
   → Positional encoding         (sin/cos, so order is known)
   → TransformerEncoder × 2      nhead=4, dim_feedforward=256, dropout=0.1
   → take last timestep
@@ -104,30 +79,32 @@ Input  (batch, 168 hours, 13 features)
 Output (batch, 24)              next 24 hours of MW
 ```
 
+**LSTMBaseline**: 2 layers, `hidden_dim=128`, last hidden state → linear head → 24.
+
 It is a **168 → 24 sequence-to-sequence** problem solved in **one shot** — the model sees 168 real hours (one week) and outputs all 24 future hours at once. No recursive feeding of predictions back as inputs (which compounds error).
 
-An **LSTM baseline** (`hidden_dim=128`, 2 layers) and a **naive baseline** are trained/run alongside it for the ablation.
+Two naive baselines run alongside for the comparison: **copy yesterday** (the next 24 hours repeat the last 24) and **copy last week** (the same hours one week ago).
 
-### Features (13)
+### Features (10)
 
-- **Raw load** (`load_mw`)
-- **Fourier time encodings** — sin/cos of hour, day-of-week, month (so hour 23 and hour 0 are "close")
-- **Lags** — load 1h, 24h, and 168h (same hour last week) ago
-- **Rolling stats** — 24h mean and std
-- **is_weekend** flag
+- **Load** (`load_mw`), z-score scaled
+- **Fourier time encodings** — sin/cos of hour, day-of-week, month (so hour 23 and hour 0 are "close"), computed in each region's **local time**, since people use power by the local clock
+- **Weekend flag**, also in local time
+- **Lags** — load 24h and 168h (same hour last week) ago
 
-All features are z-score normalized with the scaler **fit on training data only** (no leakage).
+The scaler is fit on the **training years only** (no leakage) and is **saved with each registered model**, so a forecast always uses exactly the scaling that model was trained with.
 
 ---
 
 ## MLOps Highlights
 
-- **From-scratch models** — every layer written by hand; raw training loop with AdamW, `CosineAnnealingLR`, gradient clipping, and early stopping. No HuggingFace, no `Trainer`.
-- **Champion / Challenger registry** — `registry.py` evaluates both models on the test set, registers the winner in DagsHub, and only promotes a challenger that beats the champion by **>1%** test MAE.
-- **Data validation** — Pandera contract (`validation.py`) rejects nulls, spikes, and gaps before any data reaches training.
-- **Drift detection** — Evidently (`drift.py`) compares a fresh EIA pull against the champion's pinned training distribution (K-S test). The reference snapshot is saved at crowning time, so drift always measures against what the live model actually learned.
-- **Hybrid retraining** — `pipeline.py retrain` retrains a region when **drift fires OR** the champion exceeds a 30-day age cap (catches slow shifts the statistical test misses).
-- **Chronological splits** — 70/15/15 by time, never shuffled. The test set is the most recent data and is never touched during training or tuning.
+- **From-scratch models** — every network written in plain PyTorch; raw training loop with AdamW, `CosineAnnealingLR`, gradient clipping, and early stopping. No HuggingFace, no `Trainer`.
+- **Data cleaning and validation** — `validation.py` blanks out impossible values and sudden one-hour glitches, then fills every missing hour (short gaps with a straight line, long gaps with the same hour one week earlier). A Pandera contract confirms one clean value per hour before anything reaches training.
+- **Chronological splits** — 5 years split by time, never shuffled: 3 years train, 1 year validation, 1 year test. Each part covers every season. The test year is never used to make a decision.
+- **Champion / Challenger registry** — `registry.py` picks the better model on the **validation year**, registers it in DagsHub with its scaler, and promotes it only if it beats the current champion by **>1%**. The champion is re-scored on the same new data first, so the comparison is fair.
+- **Performance-based drift detection** — `drift.py` replays the champion's last 60 days of forecasts against what actually happened. Because some seasons are simply harder for every forecaster, it judges the champion *relative to "copy yesterday"* and compares that ratio with the one from the test year. Exit code 10 means drift; any other failure is an error, not a signal.
+- **Hybrid retraining** — `pipeline.py retrain` retrains a region when drift fires **or** the champion is older than 30 days.
+- **Light daily forecast** — the daily job downloads only the last three weeks of data. No retraining, no 5-year pull.
 
 ---
 
@@ -135,9 +112,9 @@ All features are z-score normalized with the scaler **fit on training data only*
 
 | Workflow | Schedule | Command | Purpose |
 |----------|----------|---------|---------|
-| `forecast.yml` | hourly (`0 * * * *`) | `pipeline.py forecast` | rolling 24h forecast → S3 |
-| `retrain.yml` | weekly (`0 2 * * 0`) | `pipeline.py retrain` | drift/staleness check → retrain if needed |
-| `build.yml` | manual | `pipeline.py build` | full rebuild — train all, crown champions |
+| `forecast.yml` | daily (`13 6 * * *`) | `pipeline.py forecast` | 24h forecast for all regions → S3 |
+| `retrain.yml` | weekly (`0 2 * * 0`), one job per region | `pipeline.py retrain --region <r>` | drift/age check → retrain the Transformer if needed |
+| `build.yml` | manual, one job per region | `pipeline.py build --region <r>` | full rebuild — train both models, crown champion, first forecast |
 
 All run on free public-repo runners (CPU; the models are small). Cost ≈ **$0**.
 
@@ -148,16 +125,16 @@ All run on free public-repo runners (CPU; the models are small). Cost ≈ **$0**
 ```
 voltcast/
 ├── src/
-│   ├── ingestion.py    # pull hourly demand from EIA (rolling 5-year window)
-│   ├── validation.py   # Pandera data contract
-│   ├── features.py     # Fourier / lag / rolling features + normalization
-│   ├── dataset.py      # sliding windows (168→24), PyTorch DataLoaders
-│   ├── model.py        # TemporalTransformer + LSTMBaseline (from scratch)
+│   ├── ingestion.py    # pull hourly demand from EIA (last N days, default 5 years)
+│   ├── validation.py   # clean glitches/gaps + Pandera contract
+│   ├── features.py     # local-time calendar features, lags, z-score scaling
+│   ├── dataset.py      # time split + sliding windows (168→24), DataLoaders
+│   ├── model.py        # TemporalTransformer + LSTMBaseline
 │   ├── train.py        # hand-written training loop + MLflow logging
-│   ├── evaluate.py     # ablation: Naive vs LSTM vs Transformer
-│   ├── registry.py     # champion/challenger promotion + drift reference
+│   ├── evaluate.py     # test-year comparison: baselines vs LSTM vs Transformer
+│   ├── registry.py     # champion/challenger promotion, saves scaler with the model
 │   ├── inference.py    # champion → next 24h forecast
-│   ├── drift.py        # Evidently drift report
+│   ├── drift.py        # is the champion still beating "copy yesterday"?
 │   ├── storage.py      # S3-or-local I/O (parquet + JSON)
 │   ├── mlflow_setup.py # DagsHub-or-local MLflow config
 │   └── pipeline.py     # orchestrator: build / forecast / retrain
@@ -176,15 +153,20 @@ Dependencies are managed with [uv](https://github.com/astral-sh/uv).
 uv sync                                   # install everything from uv.lock
 
 # one command per pipeline mode:
-uv run python src/pipeline.py build       # full rebuild (trains all models)
+uv run python src/pipeline.py build       # full rebuild (trains all models, slow)
 uv run python src/pipeline.py forecast    # daily 24h forecast for all regions
-uv run python src/pipeline.py retrain     # drift/staleness-gated retrain
+uv run python src/pipeline.py retrain     # drift/age-gated retrain
 
-# or individual stages:
+# or individual stages (regions: CAL, TEX, PJM, MISO):
 uv run python src/ingestion.py
-uv run python src/train.py --model transformer --country CAL
-uv run python src/evaluate.py --country CAL
-uv run python src/drift.py --country CAL
+uv run python src/validation.py
+uv run python src/features.py
+uv run python src/train.py --model transformer --region CAL
+uv run python src/train.py --model lstm --region CAL
+uv run python src/registry.py --region CAL
+uv run python src/evaluate.py --region CAL
+uv run python src/inference.py --region CAL
+uv run python src/drift.py --region CAL
 ```
 
 The dashboard is a Next.js app in `frontend/`, deployed on Vercel. It fetches
@@ -204,7 +186,7 @@ EIA_API_KEY=...               # free key from eia.gov/opendata
 DAGSHUB_REPO_OWNER=...         # hosted MLflow (models + registry)
 DAGSHUB_REPO_NAME=...
 DAGSHUB_TOKEN=...
-S3_BUCKET=...                  # forecasts + drift references
+S3_BUCKET=...                  # forecasts
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=us-east-1
@@ -214,9 +196,19 @@ Everything has a **local fallback** — with no cloud config, MLflow uses local 
 
 ---
 
+## Known limitations
+
+- **No weather input.** Demand is driven heavily by temperature, but the models only see past demand and the calendar. A temperature forecast would likely help most; it is deliberately left out to keep the system simple, and is untested here.
+- **Demand level is rising.** The test year averages higher than the training years, so the models slightly under-predict. The weekly drift check and 30-day retrain are meant to track this.
+- **One test year.** Every season is covered once, so regional error rates are estimates from a single year.
+- **LSTM trains on CPU only.** Apple's GPU backend (MPS) gave wrong LSTM results in testing (weights that scored well on the GPU scored far worse on the CPU), so the LSTM is always trained on the CPU. The Transformer was checked and is identical on both.
+- **The weekly retrain only retrains the Transformer.** In regions where the LSTM is champion (PJM, MISO), a retrained Transformer must beat the LSTM by >1% on validation to take over.
+
+---
+
 ## Tech Stack
 
-**PyTorch** · **MLflow / DagsHub** · **Evidently** · **Pandera** · **AWS S3 (boto3)** · **GitHub Actions** · **Next.js / Vercel** · **uv** · **EIA Open Data API**
+**PyTorch** · **MLflow / DagsHub** · **Pandera** · **AWS S3 (boto3)** · **GitHub Actions** · **Next.js / Vercel** · **uv** · **EIA Open Data API**
 
 ---
 
@@ -224,6 +216,6 @@ Everything has a **local fallback** — with no cloud config, MLflow uses local 
 
 1. PyTorch from scratch — no HuggingFace, no `Trainer`.
 2. One-shot forecasting — 168 real hours in, 24 out. No recursive feeding.
-3. Never touch the test set during training or tuning.
+3. Never use the test year to make decisions during training, tuning, or model selection.
 4. Never shuffle a time series — splits are chronological.
 5. Fit scalers on training data only — no leakage.
