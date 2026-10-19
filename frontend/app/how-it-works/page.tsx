@@ -79,16 +79,20 @@ export default function HowItWorks() {
             rolling 5-year window into Parquet files.
           </Step>
           <Step n={2}>
-            <strong>Validate it.</strong> A Pandera schema rejects bad rows:
-            nulls, negative load, impossible spikes, gaps in time. Corrupt data
-            never reaches the model.
+            <strong>Clean it.</strong> Empty values, impossible numbers, and
+            sudden one-hour glitches are blanked out, then every missing hour is
+            filled: short gaps with a straight line, long gaps with the same hour
+            one week earlier. A Pandera check confirms one clean value per hour
+            before anything reaches the model.
           </Step>
           <Step n={3}>
             <strong>Engineer features.</strong> Raw megawatts plus context:
             sin/cos encodings of hour, day, and month (so hour 23 sits next to
-            hour 0), lag features (load 1h, 24h, and 168h ago), rolling averages,
-            and a weekend flag. Then z-score normalize, scaler fit on the training
-            split only — no peeking at the future.
+            hour 0), a weekend flag, and the load 24h and 168h ago. The calendar
+            features use each region's local clock, since people use power by the
+            local time. Then z-score normalize with a scaler fit on the training
+            years only — no peeking at the future. The scaler is saved with the
+            model so forecasts always use the exact scaling it was trained with.
           </Step>
           <Step n={4}>
             <strong>Slide a window.</strong> The long time series becomes thousands
@@ -119,7 +123,7 @@ export default function HowItWorks() {
         </p>
         <ul className="list-none my-3.5 flex flex-col gap-2.5">
           <Bullet>
-            <strong>Input projection</strong> maps the 13 features into a 64-dim
+            <strong>Input projection</strong> maps the 10 features into a 64-dim
             internal space.
           </Bullet>
           <Bullet>
@@ -136,9 +140,12 @@ export default function HowItWorks() {
           </Bullet>
         </ul>
         <p className={PROSE}>
-          To prove it earns its place, every region also trains an LSTM and a naive
-          "tomorrow = today" baseline. If the Transformer can't beat copy-paste,
-          something is broken. It beats the naive baseline by roughly 33%.
+          To prove it earns its place, every region also trains an LSTM and is
+          compared with two naive baselines: "copy yesterday" and "copy last
+          week". The better of the two neural models on a held-out validation year
+          becomes the champion for that region. On a final, untouched test year the
+          champions beat the best naive baseline by 16% to 39%, depending on the
+          region.
         </p>
       </div>
 
@@ -152,13 +159,16 @@ export default function HowItWorks() {
         </p>
         <ul className="list-none my-3.5 flex flex-col gap-2.5">
           <Bullet>
-            <strong>Hourly:</strong> refresh data and regenerate every region's
-            24-hour forecast.
+            <strong>Daily:</strong> pull the last three weeks of data and
+            regenerate every region's 24-hour forecast.
           </Bullet>
           <Bullet>
-            <strong>Weekly:</strong> check for drift with Evidently. If the data
-            distribution moved or the model went stale, retrain. A challenger only
-            replaces the champion if it beats it by 1% on the untouched test set.
+            <strong>Weekly:</strong> check whether each champion still forecasts
+            well. We replay its last 60 days of forecasts against what actually
+            happened and compare with "copy yesterday". If it no longer beats that
+            baseline by about as much as it did on the test year, or if it is more
+            than 30 days old, it is retrained. A challenger only replaces the
+            champion if it beats it by 1% on the same held-out validation year.
           </Bullet>
           <Bullet>
             <strong>Tracked:</strong> MLflow on DagsHub logs every run's
