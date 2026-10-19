@@ -102,8 +102,9 @@ def build_schema(region: str) -> pa.DataFrameSchema:
     )
 
 
-def clean_region(region: str) -> pd.DataFrame:
-    df = pd.read_parquet(RAW_DIR / f"{region}.parquet").sort_values("timestamp")
+def clean_frame(df: pd.DataFrame, region: str) -> tuple[pd.DataFrame, dict]:
+    """Clean a table of (timestamp, load_mw). Returns (clean table, counts of what was fixed)."""
+    df = df.sort_values("timestamp")
     rows_in = len(df)
     df = df.drop_duplicates("timestamp", keep="last")
 
@@ -123,10 +124,19 @@ def clean_region(region: str) -> pd.DataFrame:
     out = s.rename("load_mw").rename_axis("timestamp").reset_index()
     build_schema(region).validate(out)  # raises an error if anything is still wrong
 
-    print(f"{region}: {rows_in:,} rows in -> {len(out):,} rows out")
-    print(f"  hours EIA skipped: {n_skipped} | empty values: {n_empty}")
-    print(f"  impossible values: {n_impossible} | glitches: {n_glitch}")
-    print(f"  filled with straight line: {n_line} | with last week: {n_week} | fallback: {n_fallback}")
+    counts = {"rows_in": rows_in, "rows_out": len(out), "skipped": n_skipped, "empty": n_empty,
+              "impossible": n_impossible, "glitches": n_glitch,
+              "line": n_line, "last_week": n_week, "fallback": n_fallback}
+    return out, counts
+
+
+def clean_region(region: str) -> pd.DataFrame:
+    """Clean the region's raw file and print what was fixed."""
+    out, c = clean_frame(pd.read_parquet(RAW_DIR / f"{region}.parquet"), region)
+    print(f"{region}: {c['rows_in']:,} rows in -> {c['rows_out']:,} rows out")
+    print(f"  hours EIA skipped: {c['skipped']} | empty values: {c['empty']}")
+    print(f"  impossible values: {c['impossible']} | glitches: {c['glitches']}")
+    print(f"  filled with straight line: {c['line']} | with last week: {c['last_week']} | fallback: {c['fallback']}")
     return out
 
 

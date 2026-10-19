@@ -26,9 +26,9 @@ URL = "https://api.eia.gov/v2/electricity/rto/region-data/data/"
 RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
 
-def fetch_region(region: str, api_key: str) -> pd.DataFrame:
-    """Download all hourly demand rows for one region. Returns timestamp + load_mw."""
-    start = datetime.now(timezone.utc) - timedelta(days=365 * YEARS_OF_DATA)
+def fetch_region(region: str, api_key: str, days: int = 365 * YEARS_OF_DATA) -> pd.DataFrame:
+    """Download the last `days` days of hourly demand for one region. Returns timestamp + load_mw."""
+    start = datetime.now(timezone.utc) - timedelta(days=days)
     all_rows = []
     offset = 0  # which row to start from; moves forward one page at a time
 
