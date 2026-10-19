@@ -1,135 +1,112 @@
 """
-Two from-scratch PyTorch models with identical I/O shapes for a fair comparison:
-LSTMBaseline (recurrent) and TemporalTransformer (attention, our main model).
+The two neural networks we compare. Both take the same input and give the same
+output, so the comparison is fair:
 
-    Input:  (batch, seq_len=168, num_features=13)
-    Output: (batch, forecast_horizon=24)
+    input:  (batch, 168 hours, 10 features)
+    output: (batch, 24)   the predicted demand for the next 24 hours (scaled)
+
+    python src/model.py   # quick check: push fake data through both models
 """
 
 import math
+
 import torch
 import torch.nn as nn
+
+NUM_FEATURES = 10
+SEQ_LEN = 168
+FORECAST_HORIZON = 24
 
 
 class LSTMBaseline(nn.Module):
     """
-    LSTM baseline: reads 168 hours left to right, predicts next 24 from the
-    final hidden state. If the Transformer can't beat this, something's wrong.
+    Reads the 168 hours one by one, left to right, keeping a running "memory".
+    After the last hour, that memory is turned into 24 predictions.
     """
 
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int = 128,
-        num_layers: int = 2,
-        dropout: float = 0.1,
-        forecast_horizon: int = 24,
-    ):
+    def __init__(self, input_dim: int = NUM_FEATURES, hidden_dim: int = 128,
+                 num_layers: int = 2, dropout: float = 0.1):
         super().__init__()
-
         self.lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers,
-            batch_first=True,
+            batch_first=True,   # input shape is (batch, hours, features)
             dropout=dropout,
         )
-        self.output_head = nn.Linear(hidden_dim, forecast_horizon)
+        self.head = nn.Linear(hidden_dim, FORECAST_HORIZON)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out, _ = self.lstm(x)
-        # last timestep's hidden state summarizes all 168 hours
-        last_hidden = out[:, -1, :]
-        return self.output_head(last_hidden)
+        out, _ = self.lstm(x)        # memory after every hour: (batch, 168, 128)
+        last = out[:, -1, :]         # memory after the LAST hour (it has read everything)
+        return self.head(last)       # (batch, 24)
 
 
 class PositionalEncoding(nn.Module):
     """
-    Adds position info to each timestep. A Transformer sees all 168 hours at
-    once and has no inherent sense of order, so we add a unique sine/cosine
-    pattern per position to let it tell hour 1 from hour 100.
-
-        PE(pos, 2i)   = sin(pos / 10000^(2i/d_model))
-        PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
+    A Transformer looks at all 168 hours at once, so it has no sense of order.
+    This adds a unique wave pattern to each position, so it can tell hour 1
+    from hour 100.
     """
 
     def __init__(self, d_model: int, max_len: int = 512, dropout: float = 0.1):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
 
+        position = torch.arange(max_len).unsqueeze(1).float()  # 0, 1, 2, ...
+        # different positions get different wave speeds (fast waves, slow waves)
+        speed = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len).unsqueeze(1).float()
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        pe[:, 0::2] = torch.sin(position * speed)
+        pe[:, 1::2] = torch.cos(position * speed)
 
-        # buffer, not a parameter: moves with the model but the optimizer ignores it
+        # a buffer is saved with the model but is not learned
         self.register_buffer("pe", pe.unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.pe[:, : x.size(1)]
-        return self.dropout(x)
+        return self.dropout(x + self.pe[:, : x.size(1)])
 
 
 class TemporalTransformer(nn.Module):
     """
-    Encoder-only Transformer for forecasting:
-        13 -> d_model projection -> positional encoding -> N encoder layers
-        -> take last timestep -> linear head -> 24 predictions.
-
-    Encoder-only (no decoder) because we emit all 24 hours at once from a fixed
-    input, not autoregressively. We read off the last timestep because after
-    attention it has seen the whole sequence and is the most recent context.
+    10 features -> a wider internal size -> add positions -> attention layers
+    -> take the last hour -> 24 predictions.
     """
 
-    def __init__(
-        self,
-        input_dim: int,
-        d_model: int = 64,
-        nhead: int = 4,             # d_model must be divisible by nhead
-        num_layers: int = 2,
-        dim_feedforward: int = 256,
-        dropout: float = 0.1,
-        forecast_horizon: int = 24,
-    ):
+    def __init__(self, input_dim: int = NUM_FEATURES, d_model: int = 64, nhead: int = 4,
+                 num_layers: int = 2, dim_feedforward: int = 256, dropout: float = 0.1):
         super().__init__()
+        self.input_projection = nn.Linear(input_dim, d_model)  # 10 numbers -> 64 numbers
+        self.positions = PositionalEncoding(d_model, dropout=dropout)
 
-        self.input_projection = nn.Linear(input_dim, d_model)
-        self.pos_encoding = PositionalEncoding(d_model, dropout=dropout)
-
-        encoder_layer = nn.TransformerEncoderLayer(
+        layer = nn.TransformerEncoderLayer(
             d_model=d_model,
-            nhead=nhead,
+            nhead=nhead,                       # 4 "attention heads", each looks for its own pattern
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.output_head = nn.Linear(d_model, forecast_horizon)
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+        self.head = nn.Linear(d_model, FORECAST_HORIZON)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.input_projection(x)
-        x = self.pos_encoding(x)
-        x = self.transformer(x)
-        x = x[:, -1, :]
-        return self.output_head(x)
+        x = self.input_projection(x)   # (batch, 168, 64)
+        x = self.positions(x)
+        x = self.encoder(x)            # every hour now carries info from all other hours
+        x = x[:, -1, :]                # the last hour: it has "looked at" the whole week
+        return self.head(x)            # (batch, 24)
+
+
+def count_parameters(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters())
 
 
 def main():
-    """Push a random batch through both models to check output shapes."""
-    batch_size, seq_len, num_features = 64, 168, 13
-    fake_batch = torch.randn(batch_size, seq_len, num_features)
-    print("Input shape:", fake_batch.shape)
-
-    lstm = LSTMBaseline(input_dim=num_features)
-    print(f"LSTM output: {lstm(fake_batch).shape}  (expect (64, 24))")
-    print(f"LSTM params: {sum(p.numel() for p in lstm.parameters()):,}")
-
-    transformer = TemporalTransformer(input_dim=num_features)
-    print(f"Transformer output: {transformer(fake_batch).shape}  (expect (64, 24))")
-    print(f"Transformer params: {sum(p.numel() for p in transformer.parameters()):,}")
+    fake = torch.randn(64, SEQ_LEN, NUM_FEATURES)
+    print("input:", tuple(fake.shape))
+    for name, model in (("LSTM", LSTMBaseline()), ("Transformer", TemporalTransformer())):
+        out = model(fake)
+        print(f"{name:<12} output {tuple(out.shape)} | {count_parameters(model):,} learnable numbers")
 
 
 if __name__ == "__main__":
