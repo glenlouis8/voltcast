@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()  # reads .env so os.getenv can see EIA_API_KEY
 
 REGIONS = ["CAL", "TEX", "PJM", "MISO"]
-YEARS_OF_DATA = 4
+YEARS_OF_DATA = 5  # 3 years train + 1 year validation + 1 year test
 PAGE_SIZE = 5000  # EIA gives at most 5000 rows per request
 MAX_TRIES = 5     # tries per request before giving up
 URL = "https://api.eia.gov/v2/electricity/rto/region-data/data/"
