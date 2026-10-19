@@ -200,6 +200,7 @@ Everything has a **local fallback** — with no cloud config, MLflow uses local 
 
 - **No weather input.** Demand is driven heavily by temperature, but the models only see past demand and the calendar. A temperature forecast would likely help most; it is deliberately left out to keep the system simple, and is untested here.
 - **Demand level is rising.** The test year averages higher than the training years, so the models slightly under-predict. The weekly drift check and 30-day retrain are meant to track this.
+- **The newest hours are preliminary.** EIA revises its most recent 1–3 hours after publishing them (changes of up to ~2,500 MW were observed), so the last few input hours of a forecast can shift slightly between runs.
 - **One test year.** Every season is covered once, so regional error rates are estimates from a single year.
 - **LSTM trains on CPU only.** Apple's GPU backend (MPS) gave wrong LSTM results in testing (weights that scored well on the GPU scored far worse on the CPU), so the LSTM is always trained on the CPU. The Transformer was checked and is identical on both.
 - **The weekly retrain only retrains the Transformer.** In regions where the LSTM is champion (PJM, MISO), a retrained Transformer must beat the LSTM by >1% on validation to take over.
