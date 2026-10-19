@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from features import TRAIN_RATIO  # same train share the scaler used, so they can't disagree
+from features import DEMAND_COLS, TRAIN_RATIO  # same train share the scaler used, so they can't disagree
 
 FEATURES_DIR = Path(__file__).parent.parent / "data" / "features"
 
@@ -29,6 +29,21 @@ FEATURE_COLS = [
     "is_weekend",
     "lag_24", "lag_168",
 ]
+
+# positions of the columns that hold demand in (scaled) MW
+DEMAND_IDX = [FEATURE_COLS.index(c) for c in DEMAND_COLS]
+
+
+def rescale_demand(X: torch.Tensor, from_scaler: dict, to_scaler: dict) -> torch.Tensor:
+    """
+    The features file is scaled with this week's average/spread, but a model must see
+    numbers scaled the way IT was trained. Convert: scaled -> real MW -> model's scaling.
+    If both scalers are the same, nothing changes.
+    """
+    X = X.clone()
+    mw = X[..., DEMAND_IDX] * from_scaler["std"] + from_scaler["mean"]
+    X[..., DEMAND_IDX] = (mw - to_scaler["mean"]) / to_scaler["std"]
+    return X
 
 
 class WindowDataset(Dataset):

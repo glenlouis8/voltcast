@@ -21,14 +21,13 @@ import torch
 from mlflow.tracking import MlflowClient
 from torch.utils.data import DataLoader
 
-from dataset import FEATURE_COLS, make_datasets
-from features import DEMAND_COLS, FEATURES_DIR
+from dataset import make_datasets, rescale_demand
+from features import FEATURES_DIR
 from mlflow_setup import setup_mlflow
 from train import CHECKPOINT_DIR, build_model
 
 PROMOTION_THRESHOLD = 0.01  # challenger must be more than 1% better than the champion
 DEVICE = torch.device("cpu")  # the trusted reference, same as the CI runner
-DEMAND_IDX = [FEATURE_COLS.index(c) for c in DEMAND_COLS]  # columns that are scaled MW
 
 
 def score_mw(model, dataset, model_scaler: dict, data_scaler: dict) -> tuple[float, float]:
@@ -44,9 +43,7 @@ def score_mw(model, dataset, model_scaler: dict, data_scaler: dict) -> tuple[flo
     error_sum, count, demand_sum = 0.0, 0, 0.0
     with torch.no_grad():
         for X, y in DataLoader(dataset, batch_size=256, shuffle=False):
-            X = X.clone()
-            mw = X[..., DEMAND_IDX] * data_scaler["std"] + data_scaler["mean"]
-            X[..., DEMAND_IDX] = (mw - model_scaler["mean"]) / model_scaler["std"]
+            X = rescale_demand(X, data_scaler, model_scaler)
 
             pred_mw = model(X) * model_scaler["std"] + model_scaler["mean"]
             actual_mw = y * data_scaler["std"] + data_scaler["mean"]
