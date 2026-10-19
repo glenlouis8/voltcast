@@ -71,7 +71,8 @@ def forecast(region: str) -> None:
         scaled = model(X)[0]  # 24 numbers, in the champion's scaling
     predicted_mw = (scaled * champ_scaler["std"] + champ_scaler["mean"]).numpy()
 
-    hours = pd.date_range(last_hour + pd.Timedelta(hours=1), periods=FORECAST_HORIZON, freq="h")
+    # 25 hours starting at the last known hour, then drop that first one: the 24 hours after it
+    hours = pd.date_range(last_hour, periods=FORECAST_HORIZON + 1, freq="h")[1:]
     table = pd.DataFrame({"timestamp": hours, "predicted_load_mw": predicted_mw})
 
     # same shape the dashboard already reads
