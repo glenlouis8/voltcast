@@ -77,7 +77,9 @@ def run_epoch(model, loader, loss_fn, device, optimizer=None) -> float:
 
 def train(model_name: str, region: str, max_epochs: int, use_mlflow: bool) -> None:
     torch.manual_seed(SEED)  # same starting numbers every run, so runs are comparable
-    device = get_device()
+    # The LSTM gives wrong results on Apple's GPU (MPS): weights trained there scored
+    # 1,029 MW in training but 2,884 MW on the CPU. So the LSTM always trains on the CPU.
+    device = torch.device("cpu") if model_name == "lstm" else get_device()
     print(f"device: {device} | training {model_name} on {region}")
 
     # the error is in scaled units; multiply by the spread to read it in MW
