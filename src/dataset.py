@@ -1,111 +1,106 @@
 """
-PyTorch Dataset/DataLoader for the sliding-window time series. Builds three
-chronological datasets per region (train/val/test), each producing windows of
-168 input hours -> 24 target hours.
+Split each region's feature file by time into train / validation / test and cut
+each part into sliding windows: 168 hours in -> next 24 hours out.
 
-    python src/dataset.py   # quick sanity check
+    python src/dataset.py   # quick check: sizes, date ranges, one batch
 """
 
-import torch
-import numpy as np
-import pandas as pd
-from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
+
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader, Dataset
+
+from features import TRAIN_RATIO  # same train share the scaler used, so they can't disagree
 
 FEATURES_DIR = Path(__file__).parent.parent / "data" / "features"
 
-SEQ_LEN = 168          # input: 1 week of hours
-FORECAST_HORIZON = 24  # output: next 1 day
+SEQ_LEN = 168          # model input: the last 168 hours (1 week)
+FORECAST_HORIZON = 24  # model output: the next 24 hours
+VAL_RATIO = 0.20       # test gets the rest (20%)
 
-# everything except timestamp goes to the model
+# the 10 columns the model sees (timestamp is not one of them).
+# load_mw MUST stay first: the target is read from column 0.
 FEATURE_COLS = [
     "load_mw",
     "hour_sin", "hour_cos",
     "dow_sin", "dow_cos",
     "month_sin", "month_cos",
     "is_weekend",
-    "lag_1", "lag_24", "lag_168",
-    "rolling_mean_24", "rolling_std_24",
+    "lag_24", "lag_168",
 ]
 
-# must match features.py
-TRAIN_RATIO = 0.70
-VAL_RATIO   = 0.15
 
-
-class EnergyDataset(Dataset):
+class WindowDataset(Dataset):
     """
-    Sliding-window dataset. Window i is:
-        X = rows i .. i+167                     -> (168, 13)
-        y = load_mw at rows i+168 .. i+191      -> (24,)
+    Window i:
+        X = rows i .. i+167             -> (168, 10)  what the model sees
+        y = load_mw of rows i+168 .. i+191 -> (24,)   what it must predict
     """
 
-    def __init__(self, data: np.ndarray, load_col_idx: int):
+    def __init__(self, data: torch.Tensor):
         self.data = data
-        self.load_col_idx = load_col_idx
-        # need SEQ_LEN input rows + FORECAST_HORIZON target rows per window
-        self.num_samples = len(data) - SEQ_LEN - FORECAST_HORIZON
+        # a window needs 168 input rows + 24 target rows, and can start at any row
+        # that leaves room for both
+        self.num_windows = len(data) - SEQ_LEN - FORECAST_HORIZON + 1
 
     def __len__(self) -> int:
-        return self.num_samples
+        return self.num_windows
 
     def __getitem__(self, i: int):
         X = self.data[i : i + SEQ_LEN]
-        y = self.data[i + SEQ_LEN : i + SEQ_LEN + FORECAST_HORIZON, self.load_col_idx]
-        return torch.tensor(X, dtype=torch.float32), torch.tensor(y, dtype=torch.float32)
+        y = self.data[i + SEQ_LEN : i + SEQ_LEN + FORECAST_HORIZON, 0]  # column 0 = load_mw
+        return X, y
 
 
-def load_datasets(region: str) -> tuple[EnergyDataset, EnergyDataset, EnergyDataset]:
-    """Load a region's features and split chronologically into train/val/test."""
+def split_by_time(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Oldest 60% = train, next 20% = validation, newest 20% = test. Never shuffled."""
+    n = len(df)
+    train_end = int(n * TRAIN_RATIO)
+    val_end = int(n * (TRAIN_RATIO + VAL_RATIO))
+    return df.iloc[:train_end], df.iloc[train_end:val_end], df.iloc[val_end:]
+
+
+def make_datasets(region: str) -> tuple[WindowDataset, WindowDataset, WindowDataset]:
     df = pd.read_parquet(FEATURES_DIR / f"{region}.parquet")
     df = df.sort_values("timestamp").reset_index(drop=True)
 
-    data = df[FEATURE_COLS].values
-    load_col_idx = FEATURE_COLS.index("load_mw")
-
-    n = len(data)
-    train_end = int(n * TRAIN_RATIO)
-    val_end   = int(n * (TRAIN_RATIO + VAL_RATIO))
-
-    train_ds = EnergyDataset(data[:train_end], load_col_idx)
-    val_ds   = EnergyDataset(data[train_end:val_end], load_col_idx)
-    test_ds  = EnergyDataset(data[val_end:], load_col_idx)
-
-    return train_ds, val_ds, test_ds
+    parts = split_by_time(df)
+    # windows are cut inside each part, so no window mixes train and test rows
+    return tuple(
+        WindowDataset(torch.tensor(p[FEATURE_COLS].values, dtype=torch.float32))
+        for p in parts
+    )
 
 
-def load_dataloaders(
-    region: str,
-    batch_size: int = 64,
-) -> tuple[DataLoader, DataLoader, DataLoader]:
+def make_dataloaders(region: str, batch_size: int = 64):
     """
-    Batched loaders for a region. Train is shuffled so the model doesn't learn
-    example order; val/test are not, for consistent evaluation.
+    Batches of 64 windows. Only the training windows are shuffled (the ORDER OF
+    WINDOWS, each window itself stays in time order). Validation/test stay in order.
     """
-    train_ds, val_ds, test_ds = load_datasets(region)
-
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False)
-    test_loader  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False)
-
-    return train_loader, val_loader, test_loader
+    train_ds, val_ds, test_ds = make_datasets(region)
+    return (
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True),
+        DataLoader(val_ds, batch_size=batch_size, shuffle=False),
+        DataLoader(test_ds, batch_size=batch_size, shuffle=False),
+    )
 
 
 def main():
     region = "CAL"
-    print(f"Loading datasets for {region}...")
+    df = pd.read_parquet(FEATURES_DIR / f"{region}.parquet").sort_values("timestamp")
+    parts = split_by_time(df.reset_index(drop=True))
+    train_ds, val_ds, test_ds = make_datasets(region)
 
-    train_ds, val_ds, test_ds = load_datasets(region)
-    print(f"  Train windows: {len(train_ds):,}")
-    print(f"  Val windows:   {len(val_ds):,}")
-    print(f"  Test windows:  {len(test_ds):,}")
+    print(f"{region}: {len(df):,} rows (UTC timestamps)")
+    for name, part, ds in zip(("train", "validation", "test"), parts, (train_ds, val_ds, test_ds)):
+        print(f"  {name:<10} {len(part):>6,} rows  {part.timestamp.min():%Y-%m-%d} -> "
+              f"{part.timestamp.max():%Y-%m-%d}  |  {len(ds):>6,} windows")
 
-    X, y = train_ds[0]
-    print(f"\nSingle example:  X {X.shape} (168, 13)  y {y.shape} (24,)")
-
-    train_loader, _, _ = load_dataloaders(region)
-    X_batch, y_batch = next(iter(train_loader))
-    print(f"One batch:  X {X_batch.shape} (64, 168, 13)  y {y_batch.shape} (64, 24)")
+    train_loader, _, _ = make_dataloaders(region)
+    X, y = next(iter(train_loader))
+    print(f"\none batch: X {tuple(X.shape)} (64 windows, 168 hours, 10 features)  "
+          f"y {tuple(y.shape)} (64 windows, 24 hours)")
 
 
 if __name__ == "__main__":
