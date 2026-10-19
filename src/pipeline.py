@@ -1,13 +1,12 @@
 """
-Orchestrator that runs the existing scripts in order, so one command does the
-work of ten (locally or in a GitHub Action).
+Runs the other scripts in the right order, so one command does a whole job.
 
-    python src/pipeline.py build      # full rebuild of all regions
-    python src/pipeline.py forecast   # refresh data -> predict next 24h
-    python src/pipeline.py retrain    # drift/staleness check -> retrain if needed
+    python src/pipeline.py build      # rebuild everything from scratch (manual)
+    python src/pipeline.py forecast   # daily: fresh data -> 24-hour forecast, no training
+    python src/pipeline.py retrain    # weekly: retrain a region only if it needs it
 
-Scripts run as subprocesses (not imports) so each keeps its own runnable main()
-and a failed step halts the pipeline instead of poisoning later steps.
+Each script runs as its own process, so if one step fails the pipeline stops
+there instead of carrying bad results into the next step.
 """
 
 import argparse
@@ -17,144 +16,106 @@ import time
 from pathlib import Path
 
 REGIONS = ["CAL", "TEX", "PJM", "MISO"]
+SRC = Path(__file__).parent  # scripts are called by full path, so the working folder doesn't matter
 
-# Retrain a champion older than this even if no drift fires — the K-S test can
-# miss slow, gradual shifts, so a hard age cap stops the model serving forever
-# on ancient training data.
-MAX_CHAMPION_AGE_DAYS = 30
-
-# call sibling scripts by absolute path so cwd doesn't matter
-SRC = Path(__file__).parent
+DRIFT_EXIT_CODE = 10          # drift.py exits with this when the champion has gone stale
+MAX_CHAMPION_AGE_DAYS = 30    # retrain a champion this old even if it still looks fine
+FORECAST_DAYS = 21            # a daily forecast only needs the last 3 weeks of data
 
 
-def run(script: str, *args: str, allow_fail: bool = False) -> int:
-    """
-    Run `python src/<script> <args>` in this file's venv (via sys.executable).
-    Non-zero exit raises unless allow_fail — used for drift.py, whose exit 1
-    means "drift detected" (a signal, not an error).
-    """
-    cmd = [sys.executable, str(SRC / script), *args]
-    pretty = " ".join([script, *args])
-    print(f"\n{'-'*60}\n> {pretty}\n{'-'*60}")
-
-    result = subprocess.run(cmd)
-    if result.returncode != 0 and not allow_fail:
-        raise SystemExit(f"step failed: {pretty} (exit {result.returncode})")
-    return result.returncode
+def run(script: str, *args: str, ok_codes: tuple = (0,)) -> int:
+    """Run `python src/<script> <args>`. Stops the whole pipeline unless the exit code is in ok_codes."""
+    print(f"\n{'-' * 60}\n> {script} {' '.join(args)}\n{'-' * 60}", flush=True)
+    code = subprocess.run([sys.executable, str(SRC / script), *args]).returncode
+    if code not in ok_codes:
+        raise SystemExit(f"step failed: {script} {' '.join(args)} (exit code {code})")
+    return code
 
 
-def prep_data(region: str | None = None) -> None:
-    """
-    Pull fresh data, validate, build features. Each script loops all regions by
-    default; pass `region` to scope all three to just that one (used by the
-    retrain matrix jobs so a single region's job doesn't re-pull all 4).
-    """
-    args = ["--region", region] if region else []
-    run("ingestion.py", *args)
+def prep_data(region: str | None = None, days: int | None = None) -> None:
+    """Download -> clean -> build model inputs. Optionally one region and/or only the last `days` days."""
+    args = (["--region", region] if region else [])
+    ingest_args = args + (["--days", str(days)] if days else [])
+    run("ingestion.py", *ingest_args)
     run("validation.py", *args)
     run("features.py", *args)
 
 
 def mode_build() -> None:
-    """Full rebuild: train both models, crown a champion, forecast — per region."""
+    """From scratch: all data, train both models per region, pick the champion, forecast."""
     prep_data()
-    for r in REGIONS:
-        run("train.py", "--model", "transformer", "--country", r)
-        run("train.py", "--model", "lstm",        "--country", r)
-        run("registry.py", "--country", r)   # picks best, crowns champion, saves drift reference
-        run("inference.py", "--country", r)
+    for region in REGIONS:
+        run("train.py", "--model", "transformer", "--region", region)
+        run("train.py", "--model", "lstm", "--region", region)
+        run("registry.py", "--region", region)
+        run("inference.py", "--region", region)
 
 
 def mode_forecast() -> None:
-    """Daily: refresh data, then forecast next 24h per region. No training."""
-    prep_data()
-    for r in REGIONS:
-        run("inference.py", "--country", r)
+    """Daily: no training. Champions are already saved with their own scalers."""
+    prep_data(days=FORECAST_DAYS)
+    for region in REGIONS:
+        run("inference.py", "--region", region)
 
 
 def champion_age_days(region: str) -> float | None:
-    """
-    Days since this region's champion was registered, or None if there is no
-    champion. mlflow imported lazily so the forecast path doesn't pay for it.
-    """
-    from mlflow.tracking import MlflowClient
+    """Days since this region's champion was registered, or None if there is none."""
+    from mlflow.tracking import MlflowClient  # imported here so build/forecast don't need it up front
+
     from mlflow_setup import setup_mlflow
+    from registry import get_champion
 
     setup_mlflow()
-    client = MlflowClient()
-    try:
-        champ = client.get_model_version_by_alias(f"voltcast-{region}", "champion")
-    except Exception:
+    champion = get_champion(MlflowClient(), f"voltcast-{region}")
+    if champion is None:
         return None
-
-    # creation_timestamp is epoch ms; time.time() is epoch seconds
-    return (time.time() - champ.creation_timestamp / 1000) / 86400
+    return (time.time() - champion.creation_timestamp / 1000) / 86400  # timestamp is in milliseconds
 
 
-def mode_retrain(regions: list[str] = REGIONS) -> None:
+def mode_retrain(regions: list[str]) -> None:
     """
-    Weekly watchdog. Retrain a region if it drifted OR its champion is older than
-    MAX_CHAMPION_AGE_DAYS (or there's no champion). drift.py pulls its own recent
-    window, so we only prep_data() for regions that actually need retraining —
-    running it unconditionally for all 4 regions every week is what blew the
-    retrain job past its 60-minute timeout.
-
-    `regions` defaults to all 4, but the GitHub Actions workflow calls this with
-    one region per matrix job (`--region`) so training runs in parallel instead
-    of stacking 4 regions' training time into a single 60-minute job.
+    Weekly check. Retrain a region if its champion has drifted, is older than 30 days,
+    or doesn't exist. Only the Transformer is retrained: it has been the better model
+    in the comparison, and the LSTM only exists for that comparison (build mode).
     """
     retrained = []
-    for r in regions:
-        drifted = run("drift.py", "--country", r, allow_fail=True) != 0  # exit 1 = drift
+    for region in regions:
+        # exit 0 = fine, exit 10 = drift. Any other exit code stops the pipeline (a real error).
+        drifted = run("drift.py", "--region", region, ok_codes=(0, DRIFT_EXIT_CODE)) == DRIFT_EXIT_CODE
 
-        age = champion_age_days(r)
-        if age is None:
-            stale, why_age = True, "no champion yet"
-        else:
-            stale = age > MAX_CHAMPION_AGE_DAYS
-            why_age = f"champion {age:.0f}d old (cap {MAX_CHAMPION_AGE_DAYS}d)"
+        age = champion_age_days(region)
+        too_old = age is None or age > MAX_CHAMPION_AGE_DAYS
 
-        if not (drifted or stale):
-            print(f"  {r}: no drift, {why_age} -> champion kept.")
+        if not (drifted or too_old):
+            print(f"\n{region}: no drift, champion is {age:.0f} days old -> keep it")
             continue
 
-        reason = "drift" if drifted else why_age
-        print(f"  {r}: RETRAIN ({reason}).")
-        prep_data(r)
-        # lstm is ablation-only (mode_build trains it) — it has never once beaten
-        # transformer across any region, so retraining it weekly just doubles
-        # training time for no chance of a different champion.
-        run("train.py", "--model", "transformer", "--country", r)
-        run("registry.py", "--country", r)
-        run("inference.py", "--country", r)
-        retrained.append(r)
+        reason = "drift" if drifted else ("no champion yet" if age is None else f"champion is {age:.0f} days old")
+        print(f"\n{region}: RETRAIN ({reason})")
+        prep_data(region)  # full history, just this region
+        run("train.py", "--model", "transformer", "--region", region)
+        run("registry.py", "--region", region)
+        run("inference.py", "--region", region)
+        retrained.append(region)
 
-    print(f"\nRetrained: {', '.join(retrained)}" if retrained
-          else "\nNo region drifted or stale. Nothing retrained.")
+    print(f"\nretrained: {', '.join(retrained)}" if retrained else "\nnothing needed retraining")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VoltCast pipeline orchestrator.")
-    parser.add_argument(
-        "mode",
-        choices=["build", "forecast", "retrain"],
-        help="build = full rebuild | forecast = daily 24h | retrain = weekly drift-gated",
-    )
-    parser.add_argument(
-        "--region",
-        choices=REGIONS,
-        default=None,
-        help="retrain mode only: check/retrain just this region (used by the "
-             "per-region matrix job in retrain.yml). Default: all 4 regions.",
-    )
+    parser = argparse.ArgumentParser(description="Voltcast pipeline.")
+    parser.add_argument("mode", choices=["build", "forecast", "retrain"])
+    parser.add_argument("--region", choices=REGIONS,
+                        help="retrain only: check just this region (the weekly job runs one per region)")
     args = parser.parse_args()
 
-    print(f"\n{'='*60}\n  VOLTCAST PIPELINE - mode: {args.mode}\n{'='*60}")
+    print(f"\n{'=' * 60}\n  VOLTCAST PIPELINE: {args.mode}\n{'=' * 60}")
     if args.mode == "retrain":
-        mode_retrain(regions=[args.region] if args.region else REGIONS)
+        mode_retrain([args.region] if args.region else REGIONS)
+    elif args.mode == "build":
+        mode_build()
     else:
-        {"build": mode_build, "forecast": mode_forecast}[args.mode]()
-    print(f"\n{'='*60}\n  PIPELINE DONE - {args.mode}\n{'='*60}")
+        mode_forecast()
+    print(f"\n{'=' * 60}\n  DONE: {args.mode}\n{'=' * 60}")
 
 
 if __name__ == "__main__":
