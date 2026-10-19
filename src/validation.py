@@ -9,6 +9,7 @@ Why: later steps count rows to find "same hour last week" (168 rows back). A
 missing hour or a fake value would make that counting wrong.
 """
 
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -141,7 +142,11 @@ def clean_region(region: str) -> pd.DataFrame:
 
 
 def main():
-    for region in REGIONS:
+    parser = argparse.ArgumentParser(description="Clean the raw demand files.")
+    parser.add_argument("--region", choices=REGIONS, help="only this region (default: all 4)")
+    args = parser.parse_args()
+
+    for region in [args.region] if args.region else REGIONS:
         clean = clean_region(region)
         clean.to_parquet(RAW_DIR / f"{region}.parquet", index=False)
     print("\nValidation done. Files overwritten in data/raw/.")

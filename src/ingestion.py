@@ -7,6 +7,7 @@ save one file per region: data/raw/<REGION>.parquet
 Needs EIA_API_KEY in your .env file.
 """
 
+import argparse
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -79,11 +80,17 @@ def main():
     if not api_key:
         raise ValueError("EIA_API_KEY is not set. Put it in your .env file.")
 
+    parser = argparse.ArgumentParser(description="Download hourly demand from EIA.")
+    parser.add_argument("--region", choices=REGIONS, help="only this region (default: all 4)")
+    parser.add_argument("--days", type=int, default=365 * YEARS_OF_DATA,
+                        help="how many days back to download (default: 5 years)")
+    args = parser.parse_args()
+
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    for region in REGIONS:
+    for region in [args.region] if args.region else REGIONS:
         print(f"Downloading {region}...")
-        df = fetch_region(region, api_key)
+        df = fetch_region(region, api_key, days=args.days)
         df.to_parquet(RAW_DIR / f"{region}.parquet", index=False)
         print(f"  saved {len(df):,} rows ({df['timestamp'].min()} -> {df['timestamp'].max()})")
 

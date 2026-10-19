@@ -9,6 +9,7 @@ and 168 hours ago), and z-score scaling of the demand columns. The scaling
 average/spread are saved to data/features/scalers.json so they can be reversed.
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -93,9 +94,15 @@ def build_features(region: str) -> tuple[pd.DataFrame, dict]:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Build model inputs from the clean raw data.")
+    parser.add_argument("--region", choices=REGIONS, help="only this region (default: all 4)")
+    args = parser.parse_args()
+
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    scalers = {}
-    for region in REGIONS:
+    scalers_file = FEATURES_DIR / "scalers.json"
+    # keep the scalers of regions we are NOT rebuilding right now
+    scalers = json.loads(scalers_file.read_text()) if scalers_file.exists() else {}
+    for region in [args.region] if args.region else REGIONS:
         df, scalers[region] = build_features(region)
         df.to_parquet(FEATURES_DIR / f"{region}.parquet", index=False)
         s = scalers[region]
