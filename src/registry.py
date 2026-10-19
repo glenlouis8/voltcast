@@ -1,178 +1,166 @@
 """
-Champion/Challenger promotion via the MLflow Model Registry.
+Pick the best trained model, file it in the MLflow Model Registry, and decide if
+it becomes the "champion" (the model the daily forecast uses).
 
-    python src/registry.py --country CAL
+    python src/registry.py --region CAL
+    python src/registry.py --region CAL --dry-run   # score and decide, but register nothing
 
-Scores both trained models on the untouched test set, registers the lower-MAE
-one as a new version of "voltcast-<region>", and promotes it to the "champion"
-alias only if it beats the current champion by >1% (first model in wins by
-default). Aliases: champion = served by inference, challenger = unproven contender.
+How the decision works:
+  1. Score both trained models on the VALIDATION year. The better one is the
+     "challenger". (The test year is never used to decide anything.)
+  2. No champion yet -> the challenger becomes champion.
+  3. Otherwise score the current champion on the SAME validation year, and
+     promote the challenger only if it is more than 1% better.
 """
 
 import argparse
-from pathlib import Path
+import json
 
-import torch
-import numpy as np
-import pandas as pd
 import mlflow
+import torch
 from mlflow.tracking import MlflowClient
+from torch.utils.data import DataLoader
 
-from evaluate import (
-    get_scaler, denormalize, mae_mw,
-    gather_test_arrays, predict_model, load_checkpoint,
-)
-from dataset import load_datasets, TRAIN_RATIO
+from dataset import FEATURE_COLS, make_datasets
+from features import DEMAND_COLS, FEATURES_DIR
 from mlflow_setup import setup_mlflow
-from storage import save_reference, load_reference
+from train import CHECKPOINT_DIR, build_model
 
-CHECKPOINT_DIR = Path(__file__).parent.parent / "checkpoints"
-RAW_DIR        = Path(__file__).parent.parent / "data" / "raw"
-
-# columns drift.py monitors — the reference snapshot must carry these
-REFERENCE_COLS = ["load_mw", "rolling_mean_24"]
-
-# how much lower a challenger's MAE must be to dethrone the champion
-PROMOTION_THRESHOLD = 0.01   # 1%
+PROMOTION_THRESHOLD = 0.01  # challenger must be more than 1% better than the champion
+DEVICE = torch.device("cpu")  # the trusted reference, same as the CI runner
+DEMAND_IDX = [FEATURE_COLS.index(c) for c in DEMAND_COLS]  # columns that are scaled MW
 
 
-def build_reference(region: str) -> pd.DataFrame:
+def score_mw(model, dataset, model_scaler: dict, data_scaler: dict) -> tuple[float, float]:
     """
-    Reference dataset = the training slice the champion learned from, with the
-    columns drift.py monitors. Drift compares fresh data against this.
+    Average mistake of `model` on `dataset`, in MW. Returns (MAE in MW, average demand in MW).
+
+    The features file is scaled with `data_scaler` (this week's average/spread),
+    but a model must see numbers scaled the way IT was trained, `model_scaler`.
+    So we convert: scaled -> real MW -> the model's own scaling. For a freshly
+    trained model the two scalers are the same and this changes nothing.
     """
-    df = pd.read_parquet(RAW_DIR / f"{region}.parquet")
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    df["rolling_mean_24"] = df["load_mw"].rolling(24, min_periods=1).mean()
+    model.eval()
+    error_sum, count, demand_sum = 0.0, 0, 0.0
+    with torch.no_grad():
+        for X, y in DataLoader(dataset, batch_size=256, shuffle=False):
+            X = X.clone()
+            mw = X[..., DEMAND_IDX] * data_scaler["std"] + data_scaler["mean"]
+            X[..., DEMAND_IDX] = (mw - model_scaler["mean"]) / model_scaler["std"]
 
-    train_end = int(len(df) * TRAIN_RATIO)  # train slice only, never val/test
-    return df.iloc[:train_end][REFERENCE_COLS].copy()
+            pred_mw = model(X) * model_scaler["std"] + model_scaler["mean"]
+            actual_mw = y * data_scaler["std"] + data_scaler["mean"]
+
+            error_sum += (pred_mw - actual_mw).abs().sum().item()
+            demand_sum += actual_mw.sum().item()
+            count += y.numel()
+    return error_sum / count, demand_sum / count
 
 
-def test_mae_for(model_name: str, region: str, X_all, actuals_mw, mean, std, device) -> float:
-    """
-    Load a checkpoint and return its test MAE in MW. X_all/actuals_mw/mean/std
-    are passed in (computed once) so both models score on identical windows.
-    """
-    model = load_checkpoint(model_name, region, device)
-    preds_mw = denormalize(predict_model(model, X_all, device), mean, std)
-    return mae_mw(preds_mw, actuals_mw)
+def load_checkpoint(model_type: str, path) -> torch.nn.Module:
+    model = build_model(model_type).to(DEVICE)
+    model.load_state_dict(torch.load(path, map_location=DEVICE))
+    return model
 
 
-def run_registry(region: str) -> None:
+def find_registered_model(client: MlflowClient, name: str):
+    """The registered model, or None if it doesn't exist. A search returns an empty
+    list for 'not found', so we never have to guess what an error means."""
+    found = client.search_registered_models(filter_string=f"name='{name}'")
+    return found[0] if found else None
+
+
+def get_champion(client: MlflowClient, name: str):
+    """The current champion version, or None if there isn't one yet."""
+    model = find_registered_model(client, name)
+    if model is None or "champion" not in model.aliases:
+        return None
+    return client.get_model_version(name, model.aliases["champion"])
+
+
+def ensure_registered_model(client: MlflowClient, name: str) -> None:
+    if find_registered_model(client, name) is None:
+        client.create_registered_model(name)
+
+
+def run_registry(region: str, dry_run: bool) -> None:
+    data_scaler = json.loads((FEATURES_DIR / "scalers.json").read_text())[region]
+    _, val_ds, test_ds = make_datasets(region)
+
+    # 1. score every trained model on the VALIDATION year and pick the best
+    val_scores = {}
+    for model_type in ("lstm", "transformer"):
+        path = CHECKPOINT_DIR / f"{region}_{model_type}.pt"
+        if path.exists():  # the weekly retrain only trains the transformer
+            val_scores[model_type] = score_mw(load_checkpoint(model_type, path), val_ds, data_scaler, data_scaler)[0]
+    if not val_scores:
+        raise SystemExit(f"no trained models found in {CHECKPOINT_DIR} for {region}")
+
+    for name, mae in val_scores.items():
+        print(f"  {name:<12} validation MAE: {mae:,.0f} MW")
+    challenger_type = min(val_scores, key=val_scores.get)
+    challenger_val = val_scores[challenger_type]
+    challenger_path = CHECKPOINT_DIR / f"{region}_{challenger_type}.pt"
+    print(f"\nchallenger: {challenger_type} ({challenger_val:,.0f} MW on validation)")
+
+    # the test year is only used to REPORT how good the challenger is, never to decide
+    test_mae, test_demand = score_mw(load_checkpoint(challenger_type, challenger_path), test_ds, data_scaler, data_scaler)
+    test_wape = test_mae / test_demand * 100
+    print(f"  report card on test year: {test_mae:,.0f} MW ({test_wape:.2f}% of demand)")
+
+    # 2. compare with the current champion, on the same validation year
     setup_mlflow()
     client = MlflowClient()
-
-    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-    print(f"Device: {device}")
-    print(f"Champion/Challenger check: {region}\n")
-
-    # build the test set once, share across both models
-    _, _, test_ds = load_datasets(region)
-    mean, std = get_scaler(region)
-    X_all, y_all = gather_test_arrays(test_ds)
-    actuals_mw = denormalize(y_all, mean, std)
-
-    # retrain.yml only trains transformer (lstm is ablation-only, see build mode)
-    # so its checkpoint won't exist on a fresh runner — score whichever of the
-    # two actually got trained this run instead of assuming both are present.
-    scores = {}
-    for name in ("lstm", "transformer"):
-        ckpt = CHECKPOINT_DIR / f"{region}_{name}.pt"
-        if ckpt.exists():
-            scores[name] = test_mae_for(name, region, X_all, actuals_mw, mean, std, device)
-    for name, mae in scores.items():
-        print(f"  {name:<12} test MAE: {mae:,.0f} MW")
-
-    challenger_name = min(scores, key=scores.get)
-    challenger_mae  = scores[challenger_name]
-
-    # WAPE = MAE / mean(test load) as a %. Same data top and bottom, so it's an
-    # honest error rate that compares fairly across differently-sized regions.
-    challenger_wape = challenger_mae / actuals_mw.mean() * 100
-    print(f"\n  Challenger: {challenger_name} ({challenger_mae:,.0f} MW | WAPE {challenger_wape:.2f}%)")
-
     registered_name = f"voltcast-{region}"
+    champion = get_champion(client, registered_name)
 
-    try:
-        client.create_registered_model(registered_name)
-        print(f"  Created registered model: {registered_name}")
-    except Exception:
-        pass  # already exists
+    if champion is None:
+        promote = True
+        print("\nno champion yet -> the challenger becomes champion")
+    else:
+        champ_scaler = {"mean": float(champion.tags["scaler_mean"]), "std": float(champion.tags["scaler_std"])}
+        local = mlflow.artifacts.download_artifacts(champion.source)
+        champ_model = load_checkpoint(champion.tags["model_type"], f"{local}/{region}_{champion.tags['model_type']}.pt")
+        champ_val = score_mw(champ_model, val_ds, champ_scaler, data_scaler)[0]
+        improvement = (champ_val - challenger_val) / champ_val
+        promote = improvement > PROMOTION_THRESHOLD
+        print(f"\ncurrent champion v{champion.version} ({champion.tags['model_type']}): {champ_val:,.0f} MW on this validation year")
+        print(f"challenger is {improvement * 100:+.2f}% vs champion (needs more than {PROMOTION_THRESHOLD * 100:.0f}%)")
+        print("-> PROMOTE" if promote else "-> keep the champion")
 
-    # A version must point at a stored artifact, so log the checkpoint first,
-    # then register that artifact folder as a new version.
-    ckpt_path = CHECKPOINT_DIR / f"{region}_{challenger_name}.pt"
+    if dry_run:
+        print("\n(dry run: nothing was registered)")
+        return
+
+    # 3. file the challenger in the registry, with its scaler, so inference can use it later
+    ensure_registered_model(client, registered_name)
+    mlflow.set_experiment(f"voltcast-{region}")
     with mlflow.start_run(run_name=f"registry-{region}") as run:
-        mlflow.log_metric("test_mae_mw", challenger_mae)
-        mlflow.log_metric("test_wape", challenger_wape)
-        mlflow.log_param("challenger_model", challenger_name)
-        mlflow.log_artifact(str(ckpt_path), artifact_path="model")
-
-        # create_model_version (not register_model): newer MLflow's register_model
-        # expects a "logged model" entity that plain log_artifact doesn't create;
-        # create_model_version takes the raw artifact source path we have.
-        source = f"{run.info.artifact_uri}/model"
+        mlflow.log_metrics({"val_mae_mw": challenger_val, "test_mae_mw": test_mae, "test_wape": test_wape})
+        mlflow.log_param("model_type", challenger_type)
+        mlflow.log_artifact(str(challenger_path), artifact_path="model")
+        mlflow.log_dict(data_scaler, "model/scaler.json")
         version = client.create_model_version(
-            name=registered_name,
-            source=source,
-            run_id=run.info.run_id,
+            name=registered_name, source=f"{run.info.artifact_uri}/model", run_id=run.info.run_id
         )
-        print(f"  Registered as version {version.version}")
 
-    # tag the version so champion vs challenger compares without re-evaluating
-    client.set_model_version_tag(registered_name, version.version, "test_mae_mw", str(challenger_mae))
-    client.set_model_version_tag(registered_name, version.version, "test_wape", str(challenger_wape))
-    client.set_model_version_tag(registered_name, version.version, "model_type", challenger_name)
+    for key, value in {
+        "model_type": challenger_type, "val_mae_mw": challenger_val, "test_mae_mw": test_mae,
+        "test_wape": test_wape, "scaler_mean": data_scaler["mean"], "scaler_std": data_scaler["std"],
+    }.items():
+        client.set_model_version_tag(registered_name, version.version, key, str(value))
 
-    # promotion. if the champion changes we refresh the drift reference snapshot
-    # so it matches whoever is champion.
-    became_champion = False
-    try:
-        champion = client.get_model_version_by_alias(registered_name, "champion")
-        champion_mae = float(champion.tags["test_mae_mw"])
-        print(f"\n  Current champion: v{champion.version} ({champion_mae:,.0f} MW)")
-
-        improvement = (champion_mae - challenger_mae) / champion_mae
-        print(f"  Challenger is {improvement*100:+.2f}% vs champion")
-
-        if improvement > PROMOTION_THRESHOLD:
-            client.set_registered_model_alias(registered_name, "champion", version.version)
-            became_champion = True
-            print(f"  PROMOTED -> v{version.version} is the new champion "
-                  f"(beat by >{PROMOTION_THRESHOLD*100:.0f}%)")
-        else:
-            client.set_registered_model_alias(registered_name, "challenger", version.version)
-            print(f"  Not enough improvement. v{version.version} stays challenger.")
-
-    except Exception:
-        # no champion yet — first model in, crown it
-        client.set_registered_model_alias(registered_name, "champion", version.version)
-        became_champion = True
-        print(f"\n  No existing champion. v{version.version} crowned as first champion.")
-
-    if became_champion:
-        ref = build_reference(region)
-        loc = save_reference(region, ref)
-        print(f"  Reference snapshot saved -> {loc}")
-    elif load_reference(region) is None:
-        # Champion didn't change, but no reference exists yet — happens when a
-        # champion predates S3 being wired up (crowned locally, never backfilled)
-        # or already lost this bucket's snapshot some other way. Without this,
-        # drift.py falls back to a full-history rebuild forever, since a
-        # non-promoted run never otherwise touches the reference.
-        ref = build_reference(region)
-        loc = save_reference(region, ref)
-        print(f"  No reference existed -> backfilled -> {loc}")
-
-    print("\nRegistry update complete.")
+    alias = "champion" if promote else "challenger"
+    client.set_registered_model_alias(registered_name, alias, version.version)
+    print(f"\nregistered v{version.version} as {alias}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Champion/Challenger promotion.")
-    parser.add_argument("--country", default="CAL", help="Region: CAL, TEX, PJM, MISO.")
+    parser = argparse.ArgumentParser(description="Champion/challenger promotion.")
+    parser.add_argument("--region", choices=["CAL", "TEX", "PJM", "MISO"], default="CAL")
+    parser.add_argument("--dry-run", action="store_true", help="score and decide, register nothing")
     args = parser.parse_args()
-    run_registry(args.country)
+    run_registry(args.region, args.dry_run)
 
 
 if __name__ == "__main__":
