@@ -41,10 +41,10 @@ def prep_data(region: str | None = None, days: int | None = None) -> None:
     run("features.py", *args)
 
 
-def mode_build() -> None:
-    """From scratch: all data, train both models per region, pick the champion, forecast."""
-    prep_data()
-    for region in REGIONS:
+def mode_build(regions: list[str]) -> None:
+    """From scratch: per region, download all data, train both models, pick the champion, forecast."""
+    for region in regions:
+        prep_data(region)
         run("train.py", "--model", "transformer", "--region", region)
         run("train.py", "--model", "lstm", "--region", region)
         run("registry.py", "--region", region)
@@ -105,14 +105,15 @@ def main():
     parser = argparse.ArgumentParser(description="Voltcast pipeline.")
     parser.add_argument("mode", choices=["build", "forecast", "retrain"])
     parser.add_argument("--region", choices=REGIONS,
-                        help="retrain only: check just this region (the weekly job runs one per region)")
+                        help="build/retrain only: just this region (the workflows run one job per region)")
     args = parser.parse_args()
 
     print(f"\n{'=' * 60}\n  VOLTCAST PIPELINE: {args.mode}\n{'=' * 60}")
+    regions = [args.region] if args.region else REGIONS
     if args.mode == "retrain":
-        mode_retrain([args.region] if args.region else REGIONS)
+        mode_retrain(regions)
     elif args.mode == "build":
-        mode_build()
+        mode_build(regions)
     else:
         mode_forecast()
     print(f"\n{'=' * 60}\n  DONE: {args.mode}\n{'=' * 60}")
