@@ -1,9 +1,10 @@
 # forecast.yml — DAILY 24h forecast robot.
 #
-# Runs `pipeline.py forecast`: pull fresh EIA → validate → features →
+# Runs `pipeline.py forecast`: pull the last 3 weeks of EIA data → clean → features →
 # each champion predicts next 24h → forecasts written to S3 (parquet + JSON).
 #
-# No training here. Cheap + fast. Keeps the dashboard/frontend current.
+# No training here, and no 5-year download: each champion carries its own scaler.
+# Cheap + fast. Keeps the dashboard/frontend current.
 
 name: forecast
 

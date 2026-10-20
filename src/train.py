@@ -1,175 +1,154 @@
 """
-Hand-written training loop (no Trainer abstractions) for one model on one
-region, with MLflow tracking and early stopping.
+Train one model on one region with a hand-written training loop.
 
-    python src/train.py --model transformer --country CAL
-    python src/train.py --model lstm --country CAL
+    python src/train.py --model transformer --region CAL
+    python src/train.py --model lstm --region CAL
 
-Loads train/val loaders, trains up to MAX_EPOCHS, stops early when val MAE
-plateaus, and saves the best checkpoint to checkpoints/<region>_<model>.pt.
+Each round (epoch): the model sees all training windows, then we check it on the
+validation year. We keep the best version and stop early if validation stops
+improving. The test year is never touched here.
 """
 
 import argparse
+import contextlib
+import json
 from pathlib import Path
 
+import mlflow
 import torch
 import torch.nn as nn
-import mlflow
 
-from dataset import load_dataloaders, FEATURE_COLS
-from model import LSTMBaseline, TemporalTransformer
+from dataset import FEATURE_COLS, make_dataloaders
+from features import FEATURES_DIR
 from mlflow_setup import setup_mlflow
+from model import LSTMBaseline, TemporalTransformer
 
 CHECKPOINT_DIR = Path(__file__).parent.parent / "checkpoints"
 
-# hyperparameters (see CLAUDE.md training config table)
-MAX_EPOCHS    = 100
-PATIENCE      = 10        # stop if val MAE doesn't improve for this many epochs
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY  = 1e-4
-GRAD_CLIP     = 1.0       # cap gradient norm to prevent exploding gradients
-BATCH_SIZE    = 64
+MAX_EPOCHS = 40       # at most 40 rounds over the training data
+PATIENCE = 8          # stop if validation hasn't improved for 8 rounds in a row
+LEARNING_RATE = 1e-3  # how big each nudge to the model's numbers is
+WEIGHT_DECAY = 1e-4   # a small pull that stops the numbers growing too large
+GRAD_CLIP = 1.0       # cap on how big one nudge can be (prevents blow-ups)
+BATCH_SIZE = 64
+SEED = 42
 
 
 def get_device() -> torch.device:
-    # MPS = Apple GPU on M-series Macs. No CUDA branch (NVIDIA-only).
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+    # "mps" is the GPU in Apple chips; otherwise use the normal CPU
+    return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
-def build_model(model_name: str, input_dim: int) -> nn.Module:
-    if model_name == "lstm":
-        return LSTMBaseline(input_dim=input_dim)
-    if model_name == "transformer":
-        return TemporalTransformer(input_dim=input_dim)
-    raise ValueError(f"Unknown model: {model_name}. Use 'lstm' or 'transformer'.")
+def build_model(name: str) -> nn.Module:
+    if name == "lstm":
+        return LSTMBaseline(input_dim=len(FEATURE_COLS))
+    if name == "transformer":
+        return TemporalTransformer(input_dim=len(FEATURE_COLS))
+    raise ValueError(f"unknown model: {name}")
 
 
-def train_one_epoch(model, loader, loss_fn, optimizer, device) -> float:
-    """One full pass over the training data. Returns mean MAE over batches."""
-    model.train()  # dropout on
-    total_loss = 0.0
-    n_batches = 0
+def run_epoch(model, loader, loss_fn, device, optimizer=None) -> float:
+    """
+    One pass over a loader. With an optimizer = training (the model learns).
+    Without = checking (nothing changes). Returns the average error (MAE).
+    """
+    training = optimizer is not None
+    model.train(training)  # training mode turns dropout on, checking turns it off
 
-    for X, y in loader:
-        X = X.to(device)
-        y = y.to(device)
-
-        preds = model(X)
-        loss = loss_fn(preds, y)
-
-        optimizer.zero_grad()  # gradients accumulate by default; clear each batch
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
-        optimizer.step()
-
-        total_loss += loss.item()
-        n_batches += 1
-
-    return total_loss / n_batches
-
-
-def validate(model, loader, loss_fn, device) -> float:
-    """Measure val MAE with weights frozen. Returns mean MAE over batches."""
-    model.eval()  # dropout off
-    total_loss = 0.0
-    n_batches = 0
-
-    with torch.no_grad():
+    total_error, total_count = 0.0, 0
+    with torch.set_grad_enabled(training):  # no learning needed while checking
         for X, y in loader:
-            X = X.to(device)
-            y = y.to(device)
-            loss = loss_fn(model(X), y)
-            total_loss += loss.item()
-            n_batches += 1
+            X, y = X.to(device), y.to(device)
 
-    return total_loss / n_batches
+            guess = model(X)             # 1. the model guesses the next 24 hours
+            loss = loss_fn(guess, y)     # 2. how far off was it? (MAE)
+
+            if training:
+                optimizer.zero_grad()    # 3. forget the previous nudge
+                loss.backward()          # 4. work out which way to nudge each number
+                nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
+                optimizer.step()         # 5. nudge the numbers
+
+            total_error += loss.item() * len(X)  # weight by batch size (last batch is smaller)
+            total_count += len(X)
+
+    return total_error / total_count
 
 
-def train(model_name: str, region: str) -> None:
-    device = get_device()
-    print(f"Device: {device}")
-    print(f"Training {model_name} on {region}\n")
+def train(model_name: str, region: str, max_epochs: int, use_mlflow: bool) -> None:
+    torch.manual_seed(SEED)  # same starting numbers every run, so runs are comparable
+    # The LSTM gives wrong results on Apple's GPU (MPS): weights trained there scored
+    # 1,029 MW in training but 2,884 MW on the CPU. So the LSTM always trains on the CPU.
+    device = torch.device("cpu") if model_name == "lstm" else get_device()
+    print(f"device: {device} | training {model_name} on {region}")
 
-    setup_mlflow()
-    mlflow.set_experiment(f"voltcast-{region}")
+    # the error is in scaled units; multiply by the spread to read it in MW
+    spread = json.loads((FEATURES_DIR / "scalers.json").read_text())[region]["std"]
 
-    # train + val only; test stays untouched until evaluate.py
-    train_loader, val_loader, _ = load_dataloaders(region, batch_size=BATCH_SIZE)
+    train_loader, val_loader, _ = make_dataloaders(region, BATCH_SIZE)  # test loader unused
 
-    model = build_model(model_name, input_dim=len(FEATURE_COLS)).to(device)
-    loss_fn = nn.L1Loss()  # MAE, matches the eval metric
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=LEARNING_RATE,
-        weight_decay=WEIGHT_DECAY,
-    )
-    # cosine decay: big LR steps early, tiny steps late
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS)
+    model = build_model(model_name).to(device)
+    loss_fn = nn.L1Loss()  # MAE: the average size of the mistakes
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # learning rate shrinks smoothly over the planned rounds: big steps early, tiny at the end
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
 
-    best_val_mae = float("inf")
-    epochs_no_improve = 0
-    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    ckpt_path = CHECKPOINT_DIR / f"{region}_{model_name}.pt"
+    CHECKPOINT_DIR.mkdir(exist_ok=True)
+    checkpoint = CHECKPOINT_DIR / f"{region}_{model_name}.pt"
 
-    with mlflow.start_run(run_name=f"{model_name}-{region}"):
+    if use_mlflow:
+        setup_mlflow()
+        mlflow.set_experiment(f"voltcast-{region}")
+        run = mlflow.start_run(run_name=f"{model_name}-{region}")
         mlflow.log_params({
-            "model":         model_name,
-            "region":        region,
-            "learning_rate": LEARNING_RATE,
-            "weight_decay":  WEIGHT_DECAY,
-            "batch_size":    BATCH_SIZE,
-            "max_epochs":    MAX_EPOCHS,
-            "patience":      PATIENCE,
-            "grad_clip":     GRAD_CLIP,
-            "num_features":  len(FEATURE_COLS),
-            "num_params":    sum(p.numel() for p in model.parameters()),
+            "model": model_name, "region": region, "learning_rate": LEARNING_RATE,
+            "weight_decay": WEIGHT_DECAY, "batch_size": BATCH_SIZE, "max_epochs": max_epochs,
+            "patience": PATIENCE, "grad_clip": GRAD_CLIP, "num_features": len(FEATURE_COLS),
+            "num_params": sum(p.numel() for p in model.parameters()),
         })
+    else:
+        run = contextlib.nullcontext()
 
-        for epoch in range(1, MAX_EPOCHS + 1):
-            train_mae = train_one_epoch(model, train_loader, loss_fn, optimizer, device)
-            val_mae = validate(model, val_loader, loss_fn, device)
+    best_val, rounds_without_gain = float("inf"), 0
+    with run:
+        for epoch in range(1, max_epochs + 1):
+            train_mae = run_epoch(model, train_loader, loss_fn, device, optimizer)
+            val_mae = run_epoch(model, val_loader, loss_fn, device)
             scheduler.step()
 
-            # both MAEs are in normalized (z-score) units; converted to MW in evaluate.py
-            print(f"Epoch {epoch:3d} | train MAE {train_mae:.4f} | val MAE {val_mae:.4f}")
-            mlflow.log_metric("train_mae", train_mae, step=epoch)
-            mlflow.log_metric("val_mae", val_mae, step=epoch)
+            print(f"epoch {epoch:2d} | train MAE {train_mae:.4f} | val MAE {val_mae:.4f} "
+                  f"(= {val_mae * spread:,.0f} MW)")
+            if use_mlflow:
+                mlflow.log_metric("train_mae", train_mae, step=epoch)
+                mlflow.log_metric("val_mae", val_mae, step=epoch)
+                mlflow.log_metric("val_mae_mw", val_mae * spread, step=epoch)
 
-            if val_mae < best_val_mae:
-                best_val_mae = val_mae
-                epochs_no_improve = 0
-                torch.save(model.state_dict(), ckpt_path)
-                print(f"          new best, saved -> {ckpt_path.name}")
+            if val_mae < best_val:  # new best: save it
+                best_val, rounds_without_gain = val_mae, 0
+                torch.save(model.state_dict(), checkpoint)
             else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= PATIENCE:
-                    print(f"\nEarly stop: val MAE flat for {PATIENCE} epochs.")
+                rounds_without_gain += 1
+                if rounds_without_gain >= PATIENCE:
+                    print(f"stopping early: no improvement for {PATIENCE} rounds")
                     break
 
-        mlflow.log_metric("best_val_mae", best_val_mae)
-        mlflow.log_artifact(str(ckpt_path))
+        if use_mlflow:
+            mlflow.log_metric("best_val_mae", best_val)
+            mlflow.log_metric("best_val_mae_mw", best_val * spread)
+            mlflow.log_artifact(str(checkpoint))
 
-    print(f"\nDone. Best val MAE: {best_val_mae:.4f} (normalized)")
-    print(f"Best weights saved at: {ckpt_path}")
+    print(f"\nbest validation MAE: {best_val:.4f} = {best_val * spread:,.0f} MW")
+    print(f"best model saved -> {checkpoint}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train a forecasting model.")
-    parser.add_argument(
-        "--model",
-        choices=["lstm", "transformer"],
-        required=True,
-        help="Which architecture to train.",
-    )
-    parser.add_argument(
-        "--country",
-        default="CAL",
-        help="Region code: CAL, TEX, PJM, or MISO.",
-    )
+    parser.add_argument("--model", choices=["lstm", "transformer"], required=True)
+    parser.add_argument("--region", choices=["CAL", "TEX", "PJM", "MISO"], default="CAL")
+    parser.add_argument("--epochs", type=int, default=MAX_EPOCHS, help="max rounds (default 40)")
+    parser.add_argument("--no-mlflow", action="store_true", help="skip experiment tracking")
     args = parser.parse_args()
-    train(args.model, args.country)
+    train(args.model, args.region, args.epochs, use_mlflow=not args.no_mlflow)
 
 
 if __name__ == "__main__":

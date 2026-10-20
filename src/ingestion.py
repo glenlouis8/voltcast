@@ -1,134 +1,98 @@
 """
-Pull hourly electricity demand from the EIA API for 4 US grid regions and save
-one parquet per region to data/raw/<REGION>.parquet.
+Download hourly electricity demand from the EIA website for 4 grid regions and
+save one file per region: data/raw/<REGION>.parquet
 
     python src/ingestion.py
 
-Needs EIA_API_KEY in the environment (or .env).
+Needs EIA_API_KEY in your .env file.
 """
 
+import argparse
 import os
 import time
-import requests
-import pandas as pd
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # reads .env so os.getenv can see EIA_API_KEY
 
-# EIA "respondent" codes for the regions we forecast.
 REGIONS = ["CAL", "TEX", "PJM", "MISO"]
-
-# Rolling training window: always the last N years, not a fixed anchor.
-# Demand drifts (EVs, solar, AC habits, climate) so old patterns go stale, and a
-# fixed start would make the dataset grow forever. Rolling = constant size, always
-# recent. 5 years (~43,800 hours) spans several seasonal cycles.
-TRAIN_WINDOW_YEARS = 5
-START_DATE = (
-    datetime.now(timezone.utc) - timedelta(days=365 * TRAIN_WINDOW_YEARS)
-).strftime("%Y-%m-%dT%H")
-
-PAGE_SIZE = 5000  # EIA returns at most 5000 rows per call, so we paginate
+YEARS_OF_DATA = 5  # 3 years train + 1 year validation + 1 year test
+PAGE_SIZE = 5000  # EIA gives at most 5000 rows per request
+MAX_TRIES = 5     # tries per request before giving up
+URL = "https://api.eia.gov/v2/electricity/rto/region-data/data/"
 RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
-MAX_RETRIES = 5  # EIA occasionally times out or 502s under load; retry before giving up
-MAX_FETCH_SECONDS = 720  # hard ceiling per region: a slow EIA day can take ~10 min, a dead one must still fail
 
-
-def fetch_region(region: str, api_key: str, start: str = START_DATE) -> pd.DataFrame:
-    """
-    Fetch hourly demand for one region from `start` onward, paginating until the
-    API returns no more rows. Drift checks pass a recent `start` to grab only
-    recent data. Returns columns: timestamp, load_mw.
-    """
-    url = "https://api.eia.gov/v2/electricity/rto/region-data/data/"
+def fetch_region(region: str, api_key: str, days: int = 365 * YEARS_OF_DATA) -> pd.DataFrame:
+    """Download the last `days` days of hourly demand for one region. Returns timestamp + load_mw."""
+    start = datetime.now(timezone.utc) - timedelta(days=days)
     all_rows = []
-    offset = 0
-    fetch_start = time.monotonic()
-
-    print(f"  Fetching {region}...")
+    offset = 0  # which row to start from; moves forward one page at a time
 
     while True:
-        if time.monotonic() - fetch_start > MAX_FETCH_SECONDS:
-            raise TimeoutError(
-                f"{region}: exceeded {MAX_FETCH_SECONDS}s fetching from EIA "
-                f"({len(all_rows):,} rows so far) — API likely degraded, bailing out"
-            )
-
         params = {
             "api_key": api_key,
             "frequency": "hourly",
             "data[0]": "value",
-            "facets[type][]": "D",        # D = Demand
-            "facets[respondent][]": region,
-            "start": start,
+            "facets[type][]": "D",           # D = demand
+            "facets[respondent][]": region,  # which grid
+            "start": start.strftime("%Y-%m-%dT%H"),
             "sort[0][column]": "period",
             "sort[0][direction]": "asc",
             "length": PAGE_SIZE,
             "offset": offset,
         }
-
-        for attempt in range(1, MAX_RETRIES + 1):
+        # EIA is slow/flaky, so on failure wait a bit and try the same page again
+        for attempt in range(1, MAX_TRIES + 1):
             try:
-                response = requests.get(url, params=params, timeout=60)
-                response.raise_for_status()
+                response = requests.get(URL, params=params, timeout=120)
+                response.raise_for_status()  # turns HTTP errors (502 etc.) into exceptions
                 rows = response.json()["response"]["data"]
-                break
+                break  # success, leave the retry loop
             except (requests.exceptions.RequestException, KeyError) as e:
-                if attempt == MAX_RETRIES:
-                    raise
-                wait = 2 ** attempt  # 2s, 4s, 8s, 16s
-                print(f"    {region}: request failed ({e}), retry {attempt}/{MAX_RETRIES} in {wait}s...")
+                if attempt == MAX_TRIES:
+                    raise  # out of tries, give up with the real error
+                wait = 5 * attempt  # 5s, 10s, 15s, 20s
+                print(f"  {region}: failed ({type(e).__name__}), retry {attempt}/{MAX_TRIES - 1} in {wait}s")
                 time.sleep(wait)
 
-        if not rows:
-            break
-
         all_rows.extend(rows)
+        if len(rows) < PAGE_SIZE:  # a short page means this was the last one
+            break
         offset += PAGE_SIZE
-        print(f"    {region}: fetched {len(all_rows):,} rows so far...")
-        time.sleep(0.25)  # be polite to EIA's servers
 
-    print(f"  {region}: done. Total rows = {len(all_rows):,}")
+    if not all_rows:
+        raise ValueError(f"{region}: EIA returned no rows")
 
     df = pd.DataFrame(all_rows)
-    df["period"] = pd.to_datetime(df["period"])
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df = df[["period", "value"]].copy()
-    df = df.rename(columns={"period": "timestamp", "value": "load_mw"})
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    return df
+    df["timestamp"] = pd.to_datetime(df["period"])
+    df["load_mw"] = pd.to_numeric(df["value"], errors="coerce")
+    df = df[["timestamp", "load_mw"]].sort_values("timestamp")
+    return df.reset_index(drop=True)
 
 
 def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Pull EIA hourly demand data.")
-    parser.add_argument("--region", choices=REGIONS, default=None,
-                         help="only ingest this region (default: all 4)")
-    args = parser.parse_args()
-    regions = [args.region] if args.region else REGIONS
-
     api_key = os.getenv("EIA_API_KEY")
     if not api_key:
-        raise ValueError("EIA_API_KEY not set. Run: export EIA_API_KEY=your_key_here")
+        raise ValueError("EIA_API_KEY is not set. Put it in your .env file.")
+
+    parser = argparse.ArgumentParser(description="Download hourly demand from EIA.")
+    parser.add_argument("--region", choices=REGIONS, help="only this region (default: all 4)")
+    parser.add_argument("--days", type=int, default=365 * YEARS_OF_DATA,
+                        help="how many days back to download (default: 5 years)")
+    args = parser.parse_args()
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
-    for region in regions:
-        print(f"\nRegion: {region}")
-        df = fetch_region(region, api_key)
-
-        out_path = RAW_DIR / f"{region}.parquet"
-        df.to_parquet(out_path, index=False)
-
-        print(f"  Saved -> {out_path}")
-        print(f"  Shape: {df.shape[0]:,} rows x {df.shape[1]} columns")
-        print(f"  Date range: {df['timestamp'].min()} -> {df['timestamp'].max()}")
-        print(f"  Load range: {df['load_mw'].min():,.0f} MW - {df['load_mw'].max():,.0f} MW")
-
-    print("\nIngestion complete.")
+    for region in [args.region] if args.region else REGIONS:
+        print(f"Downloading {region}...")
+        df = fetch_region(region, api_key, days=args.days)
+        df.to_parquet(RAW_DIR / f"{region}.parquet", index=False)
+        print(f"  saved {len(df):,} rows ({df['timestamp'].min()} -> {df['timestamp'].max()})")
 
 
 if __name__ == "__main__":

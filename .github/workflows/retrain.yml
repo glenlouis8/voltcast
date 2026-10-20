@@ -1,9 +1,9 @@
 # retrain.yml — WEEKLY drift/staleness watchdog.
 #
-# Runs `pipeline.py retrain --region <r>`: check drift (drift.py) + champion age
-# for one region, retrain only if it drifted or its champion is stale. One job
-# per region via matrix strategy — they run in parallel, so one region's slow
-# training can't stack onto another's and blow a single job's timeout.
+# Runs `pipeline.py retrain --region <r>`: check whether the champion still forecasts
+# well on the last 60 days (drift.py) + its age, and retrain the Transformer only if it
+# drifted or is stale. One job per region via matrix strategy — they run in parallel,
+# so one region's slow training can't stack onto another's and blow a job's timeout.
 
 name: retrain
 
@@ -19,7 +19,7 @@ jobs:
       matrix:
         region: [CAL, TEX, PJM, MISO]
     runs-on: ubuntu-latest
-    timeout-minutes: 120       # transformer+lstm training runs ~55-60min per region on free CPU runners
+    timeout-minutes: 120       # 5-year download + Transformer training on a free CPU runner
     env:
       EIA_API_KEY:           ${{ secrets.EIA_API_KEY }}
       DAGSHUB_REPO_OWNER:    ${{ secrets.DAGSHUB_REPO_OWNER }}

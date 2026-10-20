@@ -1,145 +1,117 @@
 """
-Turn cleaned raw parquet (timestamp + load_mw) into a feature matrix, one per
-region at data/features/<REGION>.parquet.
+Turn clean demand data into model inputs, one file per region:
+data/features/<REGION>.parquet
 
     python src/features.py
 
-Adds Fourier time encodings, a weekend flag, lag features, and rolling stats,
-then z-score normalizes. The scaler is fit on the training slice only (first
-70% by time) to avoid leaking val/test info.
+Features: calendar (hour, day of week, month, weekend), lags (demand 24 hours
+and 168 hours ago), and z-score scaling of the demand columns. The scaling
+average/spread are saved to data/features/scalers.json so they can be reversed.
 """
+
+import argparse
+import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from pathlib import Path
 
-RAW_DIR      = Path(__file__).parent.parent / "data" / "raw"
+RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 FEATURES_DIR = Path(__file__).parent.parent / "data" / "features"
 
 REGIONS = ["CAL", "TEX", "PJM", "MISO"]
 
-# chronological split — never shuffle a time series
-TRAIN_RATIO = 0.70
-VAL_RATIO   = 0.15  # test = remaining 15%
+# 5 years split by time: first 60% (3 years) train, next 20% (1 year) validation,
+# last 20% (1 year) test. Only the train share is used here, to fit the scaling.
+TRAIN_RATIO = 0.60
+DEMAND_COLS = ["load_mw", "lag_24", "lag_168"]  # columns scaled together
+
+# Each grid lives in a different time zone. People use power by the local clock
+# (6pm is evening rush everywhere), so calendar features use local time.
+TIMEZONES = {
+    "CAL": "America/Los_Angeles",
+    "TEX": "America/Chicago",
+    "PJM": "America/New_York",
+    "MISO": "America/Chicago",
+}
 
 
-def add_fourier_encodings(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Sin/cos encodings for hour, day-of-week, month. We need both sin and cos
-    because sin alone is ambiguous (e.g. sin maps hour 3 and hour 9 to the same
-    value); together they're unique (x, y) coordinates on the cycle.
-    """
-    hour = df["timestamp"].dt.hour
+def add_calendar_features(df: pd.DataFrame, region: str) -> pd.DataFrame:
+    # our timestamps are UTC; convert to the region's local clock
+    local = df["timestamp"].dt.tz_localize("UTC").dt.tz_convert(TIMEZONES[region])
+
+    hour = local.dt.hour               # 0..23
+    day_of_week = local.dt.dayofweek   # Monday = 0 ... Sunday = 6
+    month = local.dt.month             # 1..12
+
+    # sin/cos puts a repeating number on a circle, so hour 23 and hour 0 are
+    # neighbors instead of far apart. Each needs both sin and cos to be unique.
     df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
     df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
-
-    dow = df["timestamp"].dt.dayofweek
-    df["dow_sin"] = np.sin(2 * np.pi * dow / 7)
-    df["dow_cos"] = np.cos(2 * np.pi * dow / 7)
-
-    month = df["timestamp"].dt.month
+    df["dow_sin"] = np.sin(2 * np.pi * day_of_week / 7)
+    df["dow_cos"] = np.cos(2 * np.pi * day_of_week / 7)
     df["month_sin"] = np.sin(2 * np.pi * month / 12)
     df["month_cos"] = np.cos(2 * np.pi * month / 12)
 
-    return df
-
-
-def add_weekend_flag(df: pd.DataFrame) -> pd.DataFrame:
-    # demand drops on weekends (offices/factories closed) — a signal the
-    # Fourier terms don't capture cleanly. dayofweek >= 5 is Sat/Sun.
-    df["is_weekend"] = (df["timestamp"].dt.dayofweek >= 5).astype(int)
+    df["is_weekend"] = (day_of_week >= 5).astype(int)  # Saturday or Sunday
     return df
 
 
 def add_lag_features(df: pd.DataFrame) -> pd.DataFrame:
-    # lag_1 = momentum, lag_24 = same hour yesterday, lag_168 = same hour last
-    # week (the strongest signal). First 168 rows get NaN; dropped later.
-    df["lag_1"]   = df["load_mw"].shift(1)
-    df["lag_24"]  = df["load_mw"].shift(24)
-    df["lag_168"] = df["load_mw"].shift(168)
+    # shift(n) slides the column down n rows, so each row gets the demand from n
+    # hours earlier. This works because validation made it exactly 1 row per hour.
+    df["lag_24"] = df["load_mw"].shift(24)    # same hour yesterday
+    df["lag_168"] = df["load_mw"].shift(168)  # same hour last week
     return df
 
 
-def add_rolling_stats(df: pd.DataFrame) -> pd.DataFrame:
+def scale_demand(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     """
-    Rolling mean/std over the last 24h. shift(1) first so the window only sees
-    the past — including the current row would leak the value we're predicting.
+    z-score: scaled = (value - average) / spread. The average and spread come from
+    the TRAINING rows only (first 60%). Using all rows would let the test period
+    leak into the scaling.
     """
-    past_load = df["load_mw"].shift(1)
-    df["rolling_mean_24"] = past_load.rolling(24, min_periods=1).mean()
-    df["rolling_std_24"]  = past_load.rolling(24, min_periods=1).std().fillna(0)
-    return df
+    train_end = int(len(df) * TRAIN_RATIO)
+    mean = df["load_mw"].iloc[:train_end].mean()
+    std = df["load_mw"].iloc[:train_end].std()
+
+    # all three columns are demand in MW, so they share one average and spread
+    for col in DEMAND_COLS:
+        df[col] = (df[col] - mean) / std
+
+    return df, {"mean": float(mean), "std": float(std), "train_rows": train_end}
 
 
-def normalize_load(df: pd.DataFrame, train_size: int) -> tuple[pd.DataFrame, float, float]:
-    """
-    Z-score load_mw and the MW-unit features using TRAIN statistics only. Using
-    the full dataset would let val/test influence the scaler (data leakage).
-    Returns the df plus train mean/std (saved for inference).
-    """
-    train_mean = df["load_mw"].iloc[:train_size].mean()
-    train_std  = df["load_mw"].iloc[:train_size].std()
-
-    mw_cols = ["load_mw", "lag_1", "lag_24", "lag_168", "rolling_mean_24", "rolling_std_24"]
-    for col in mw_cols:
-        df[col] = (df[col] - train_mean) / train_std
-
-    return df, train_mean, train_std
-
-
-def build_features(region: str) -> None:
-    print(f"\n{'='*50}")
-    print(f"Building features: {region}")
-    print(f"{'='*50}")
-
-    df = pd.read_parquet(RAW_DIR / f"{region}.parquet")
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    print(f"  Loaded {len(df):,} rows")
-
-    df = add_fourier_encodings(df)
-    df = add_weekend_flag(df)
+def build_features(region: str) -> tuple[pd.DataFrame, dict]:
+    df = pd.read_parquet(RAW_DIR / f"{region}.parquet").sort_values("timestamp")
+    df = df.reset_index(drop=True)
+    df = add_calendar_features(df, region)
     df = add_lag_features(df)
-    df = add_rolling_stats(df)
 
-    train_size = int(len(df) * TRAIN_RATIO)
-    val_size   = int(len(df) * VAL_RATIO)
-    print(f"  Split -> train: {train_size:,} | val: {val_size:,} | test: {len(df)-train_size-val_size:,}")
-
-    df, mean, std = normalize_load(df, train_size)
-    print(f"  Normalization -> mean={mean:,.1f} MW, std={std:,.1f} MW")
-
-    # drop lag-warmup NaNs (first ~168 rows have no lag_168)
-    before = len(df)
+    # the first 168 rows have no "last week" yet (lag_168 is empty), so drop them
     df = df.dropna().reset_index(drop=True)
-    print(f"  Dropped {before - len(df)} NaN rows (expected ~168 from lag warmup)")
-
-    # stash scaler + split sizes so inference can reuse them
-    df.attrs["train_mean"] = mean
-    df.attrs["train_std"]  = std
-    df.attrs["train_size"] = train_size
-    df.attrs["val_size"]   = val_size
-
-    FEATURES_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = FEATURES_DIR / f"{region}.parquet"
-    df.to_parquet(out_path, index=False)
-
-    print(f"  Columns: {list(df.columns)}")
-    print(f"  Final shape: {df.shape[0]:,} rows x {df.shape[1]} columns")
-    print(f"  Saved -> {out_path}")
+    return scale_demand(df)
 
 
 def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Build feature matrices.")
-    parser.add_argument("--region", choices=REGIONS, default=None,
-                         help="only build features for this region (default: all 4)")
+    parser = argparse.ArgumentParser(description="Build model inputs from the clean raw data.")
+    parser.add_argument("--region", choices=REGIONS, help="only this region (default: all 4)")
     args = parser.parse_args()
-    regions = [args.region] if args.region else REGIONS
 
-    for region in regions:
-        build_features(region)
-    print("\nFeature engineering complete.")
+    FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+    scalers_file = FEATURES_DIR / "scalers.json"
+    # keep the scalers of regions we are NOT rebuilding right now
+    scalers = json.loads(scalers_file.read_text()) if scalers_file.exists() else {}
+    for region in [args.region] if args.region else REGIONS:
+        df, scalers[region] = build_features(region)
+        df.to_parquet(FEATURES_DIR / f"{region}.parquet", index=False)
+        s = scalers[region]
+        print(f"{region}: {df.shape[0]:,} rows x {df.shape[1]} columns | "
+              f"average {s['mean']:,.0f} MW, spread {s['std']:,.0f} MW")
+
+    (FEATURES_DIR / "scalers.json").write_text(json.dumps(scalers, indent=2))
+    print("\nColumns:", list(df.columns))
+    print(f"Scalers saved -> {FEATURES_DIR / 'scalers.json'}")
 
 
 if __name__ == "__main__":
