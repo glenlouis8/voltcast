@@ -144,7 +144,7 @@ export default function HowItWorks() {
           compared with two naive baselines: "copy yesterday" and "copy last
           week". The better of the two neural models on a held-out validation year
           becomes the champion for that region. On a final, untouched test year the
-          champions beat the best naive baseline by 16% to 39%, depending on the
+          champions beat the best naive baseline by 16% to 37%, depending on the
           region.
         </p>
       </div>
