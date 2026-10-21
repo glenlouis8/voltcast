@@ -6,6 +6,16 @@ It is **serverless**: no always-on backend. Scheduled GitHub Actions pull fresh 
 
 ---
 
+## Dashboard
+
+![VoltCast dashboard: California's 24-hour forecast with champion model, test error, peak and trough](docs/images/dashboard.png)
+
+One page per region: the next 24 hours as a chart and an hourly table, plus which champion model made the forecast and how it scored on the test year. A [how it works](frontend/app/how-it-works/page.tsx) page explains the pipeline for visitors:
+
+![The how-it-works page: the pipeline in six steps and the model](docs/images/how-it-works.png)
+
+---
+
 ## Why this project
 
 Grid operators must match electricity supply to demand every hour. Too little → blackouts. Too much → wasted money. VoltCast forecasts demand 24 hours ahead so that decision has data behind it — the same problem real ISOs solve, packaged as a clean, automated ML system.
@@ -17,6 +27,8 @@ The goal was not just a model, but the **full production loop**: ingest → vali
 ## Results
 
 Scored on the **untouched test year** (the most recent 12 months, Oct 2025 – Oct 2026, never seen during training or model selection). The champion in each region is picked on a separate **validation year**, not on the test year. Primary metric is **MAE in megawatts** — the average size of the forecast's miss per predicted hour — also shown as a share of average demand.
+
+![Bar chart of test-year error as a percent of average demand for each region: best naive baseline, LSTM and Transformer](docs/images/results.png)
 
 | Region | Copy yesterday | Copy last week | LSTM | Transformer | Champion |
 |--------|---------------:|---------------:|-----:|------------:|:--------:|
